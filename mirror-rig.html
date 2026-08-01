@@ -290,6 +290,10 @@
           <button class="btn half" id="revertBtn" disabled>プロシージャルに戻す</button>
           <button class="btn half" id="removeModelBtn" disabled>モデルを外す</button>
         </div>
+        <div class="toggle-row">
+          <span>モデルを隠してリグのみ表示</span>
+          <label class="switch"><input type="checkbox" id="skeletonOnlyToggle" disabled><span class="slider"></span></label>
+        </div>
       </div>
 
       <div class="panel side-panel">
@@ -370,6 +374,7 @@
     showSkeleton: true,
     autoRotate: true,
     mode: 'procedural', // 'procedural' (built-in hologram figure) | 'rigged' (loaded GLB/VRM skeleton)
+    modelSkeletonOnly: false, // when true (and mode==='rigged'): hide the loaded mesh, show only its bone rig
     smooth: {},
     fps: { frames: 0, last: performance.now(), value: 0 },
   };
@@ -377,28 +382,37 @@
   $('mirrorToggle').addEventListener('change', e => state.mirror = e.target.checked);
   $('skeletonToggle').addEventListener('change', e => state.showSkeleton = e.target.checked);
   $('autoRotateToggle').addEventListener('change', e => state.autoRotate = e.target.checked);
+  $('skeletonOnlyToggle').addEventListener('change', e => {
+    state.modelSkeletonOnly = e.target.checked;
+    applyModelDisplayMode();
+    log(state.modelSkeletonOnly ? '3Dモデルを非表示にし、リグ（骨格）のみを表示します' : '3Dモデルの表示に戻しました');
+  });
 
   // ---------------------------------------------------------------------
   // THREE.JS SCENE — low-poly "hologram figure" reconstructed from pose data
   // ---------------------------------------------------------------------
   const ACCENT = 0x39ff9d;
-  const LIMB_COLOR = 0x1c2836;
+  const LIMB_COLOR = 0x24344a;
   let scene, camera, renderer, avatarRoot, viewportEl;
   const segMeshes = {};
   const jointMeshes = {};
   let headMesh;
 
+  // These materials belong only to the built-in procedural avatar (the
+  // model shown by default). Their brightness comes from emissive
+  // self-glow rather than scene lighting, so the avatar stays clearly
+  // visible even though the background/floor lighting is kept dim.
   function makeLimbMaterial(){
     return new THREE.MeshStandardMaterial({
-      color: LIMB_COLOR, roughness: 0.55, metalness: 0.25,
-      emissive: new THREE.Color(ACCENT).multiplyScalar(0.06),
+      color: LIMB_COLOR, roughness: 0.5, metalness: 0.2,
+      emissive: new THREE.Color(ACCENT).multiplyScalar(0.4),
       flatShading: true,
     });
   }
   function makeJointMaterial(){
     return new THREE.MeshStandardMaterial({
-      color: 0x0c1a14, roughness: 0.3, metalness: 0.1,
-      emissive: new THREE.Color(ACCENT).multiplyScalar(0.9),
+      color: 0x0c1a14, roughness: 0.25, metalness: 0.1,
+      emissive: new THREE.Color(ACCENT).multiplyScalar(1.4),
       flatShading: true,
     });
   }
@@ -532,8 +546,8 @@
   function initThree(){
     viewportEl = $('viewport');
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x10131a);
-    scene.fog = new THREE.Fog(0x10131a, 3.5, 11);
+    scene.background = new THREE.Color(0x0a0c11);
+    scene.fog = new THREE.Fog(0x0a0c11, 3, 9);
 
     camera = new THREE.PerspectiveCamera(42, viewportEl.clientWidth / viewportEl.clientHeight, 0.1, 100);
     updateCameraPos();
@@ -543,19 +557,23 @@
     renderer.setSize(viewportEl.clientWidth, viewportEl.clientHeight);
     viewportEl.appendChild(renderer.domElement);
 
-    scene.add(new THREE.HemisphereLight(0x4a5568, 0x0a0d10, 1.15));
-    const key = new THREE.DirectionalLight(0x9fd8ff, 0.75);
+    // Kept deliberately dim — the background/floor should stay quiet. The
+    // avatar's own materials carry emissive glow (see makeLimbMaterial /
+    // makeJointMaterial below) so it reads brightly on its own without
+    // needing strong scene lighting that would also light up the backdrop.
+    scene.add(new THREE.HemisphereLight(0x3d4658, 0x07090c, 0.9));
+    const key = new THREE.DirectionalLight(0x9fd8ff, 0.5);
     key.position.set(2.5, 4, 3);
     scene.add(key);
-    const rim = new THREE.DirectionalLight(ACCENT, 0.4);
+    const rim = new THREE.DirectionalLight(ACCENT, 0.45);
     rim.position.set(-3, 1.5, -2.5);
     scene.add(rim);
 
-    const grid = new THREE.GridHelper(6, 24, 0x2a3542, 0x1a2028);
+    const grid = new THREE.GridHelper(6, 24, 0x1e2430, 0x14181f);
     scene.add(grid);
     const floor = new THREE.Mesh(
       new THREE.CircleGeometry(3, 6),
-      new THREE.MeshStandardMaterial({ color: 0x141a22, roughness: 1, metalness: 0, flatShading: true })
+      new THREE.MeshStandardMaterial({ color: 0x0e131a, roughness: 1, metalness: 0, flatShading: true })
     );
     floor.rotation.x = -Math.PI / 2;
     floor.position.y = -0.002;
@@ -579,6 +597,7 @@
       camTheta += 0.0016;
       updateCameraPos();
     }
+    updateRiggedJointMarkers();
     renderer.render(scene, camera);
   }
 
@@ -603,6 +622,9 @@
   };
 
   let riggedRoot = null, riggedBones = null, riggedRestDirs = null, gltfLoader = null;
+  // "リグのみ表示" 用: 読み込んだモデルの実メッシュ一覧、骨格ライン表示、関節マーカー
+  let riggedMeshes = [], riggedSkeletonHelper = null, riggedJointMarkers = null;
+  const _jointWP = new THREE.Vector3();
 
   function normName(name){ return (name || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
   function boneSide(name){
@@ -801,9 +823,15 @@
           updateBoneChecklist();
           applyPointsToRiggedModel(getDefaultPoints());
 
+          riggedMeshes = [];
+          riggedRoot.traverse(o => { if (o.isMesh) riggedMeshes.push(o); });
+          rebuildRigVisualization(bones);
+
           state.mode = 'rigged';
+          state.modelSkeletonOnly = false;
           avatarRoot.visible = false;
           riggedRoot.visible = true;
+          applyModelDisplayMode();
 
           statusEl.textContent = `読み込み完了：${file.name}（全${bones.length}ボーン中 ${foundCount}/${DRIVEN_BONES.length}部位を自動検出）`;
           log(`3Dモデルを読み込みました: ${file.name}（${foundCount}/${DRIVEN_BONES.length}部位を自動検出）`);
@@ -830,6 +858,65 @@
     reader.readAsArrayBuffer(file);
   }
 
+  // Rebuilds the bone-only visualization (line skeleton + glowing joint
+  // markers) for the currently loaded riggedRoot. Called once per model load.
+  function rebuildRigVisualization(bones){
+    if (riggedSkeletonHelper){
+      scene.remove(riggedSkeletonHelper);
+      riggedSkeletonHelper.geometry.dispose();
+      riggedSkeletonHelper.material.dispose();
+      riggedSkeletonHelper = null;
+    }
+    if (riggedJointMarkers){
+      scene.remove(riggedJointMarkers);
+      disposeObject3D(riggedJointMarkers);
+      riggedJointMarkers = null;
+    }
+
+    riggedSkeletonHelper = new THREE.SkeletonHelper(riggedRoot);
+    riggedSkeletonHelper.material.vertexColors = false;
+    riggedSkeletonHelper.material.color.set(ACCENT);
+    riggedSkeletonHelper.material.linewidth = 2;
+    riggedSkeletonHelper.visible = false;
+    scene.add(riggedSkeletonHelper);
+
+    riggedJointMarkers = new THREE.Group();
+    riggedJointMarkers.visible = false;
+    bones.forEach(b => {
+      const m = new THREE.Mesh(new THREE.IcosahedronGeometry(0.022, 0), makeJointMaterial());
+      m.userData.bone = b;
+      riggedJointMarkers.add(m);
+    });
+    scene.add(riggedJointMarkers);
+  }
+
+  // Reads each tracked bone's current world position and moves its marker
+  // sphere there. Runs every frame while the rig-only view is visible.
+  function updateRiggedJointMarkers(){
+    if (!riggedJointMarkers || !riggedJointMarkers.visible) return;
+    riggedJointMarkers.children.forEach(m => {
+      m.userData.bone.getWorldPosition(_jointWP);
+      m.position.copy(_jointWP);
+    });
+  }
+
+  // Central switchboard for what's actually visible in the 3D viewport:
+  // - procedural mode: only the built-in hologram figure
+  // - rigged mode + mesh view: the loaded 3D model as-is
+  // - rigged mode + skeleton-only view: model mesh hidden, bones shown instead
+  function applyModelDisplayMode(){
+    const showingModel = !!riggedRoot && state.mode === 'rigged';
+    const skeletonOnly = showingModel && state.modelSkeletonOnly;
+
+    riggedMeshes.forEach(m => { m.visible = showingModel && !skeletonOnly; });
+    if (riggedSkeletonHelper) riggedSkeletonHelper.visible = skeletonOnly;
+    if (riggedJointMarkers) riggedJointMarkers.visible = skeletonOnly;
+
+    const toggle = $('skeletonOnlyToggle');
+    toggle.disabled = !showingModel;
+    toggle.checked = state.modelSkeletonOnly;
+  }
+
   function setRevertButtonLabel(){
     const btn = $('revertBtn');
     if (!riggedRoot){ btn.textContent = 'プロシージャルに戻す'; btn.disabled = true; return; }
@@ -851,17 +938,23 @@
       log('モデル表示に切り替えました');
     }
     setRevertButtonLabel();
+    applyModelDisplayMode();
   }
 
   function removeModel(){
     if (riggedRoot){ scene.remove(riggedRoot); disposeObject3D(riggedRoot); riggedRoot = null; }
+    if (riggedSkeletonHelper){ scene.remove(riggedSkeletonHelper); riggedSkeletonHelper.geometry.dispose(); riggedSkeletonHelper.material.dispose(); riggedSkeletonHelper = null; }
+    if (riggedJointMarkers){ scene.remove(riggedJointMarkers); disposeObject3D(riggedJointMarkers); riggedJointMarkers = null; }
+    riggedMeshes = [];
     riggedBones = null; riggedRestDirs = null;
     state.mode = 'procedural';
+    state.modelSkeletonOnly = false;
     avatarRoot.visible = true;
     $('modelStatus').textContent = '未読み込み（プロシージャル表示中）';
     $('boneChecklist').innerHTML = '';
     $('removeModelBtn').disabled = true;
     setRevertButtonLabel();
+    applyModelDisplayMode();
     log('モデルを外しました');
   }
 
