@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Finger Particle Tracker</title>
+<style>
+  :root{
+    --bg:#0a0a0f;
+    --panel:#12121a;
+    --accent:#7dffb3;
+    --accent2:#5ec6ff;
+    --text:#e8e8f0;
+    --muted:#8888a0;
+    --border:#26263a;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0;padding:0;height:100%;
+    background:var(--bg);
+    color:var(--text);
+    font-family:"Helvetica Neue",Arial,"Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif;
+    overflow:hidden;
+  }
+  #stage{
+    position:relative;
+    width:100%;
+    height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:radial-gradient(circle at 50% 40%, #14141f 0%, #08080c 70%);
+  }
+  #videoWrap{
+    position:relative;
+    width:min(92vw, 960px);
+    aspect-ratio:16/9;
+    border-radius:14px;
+    overflow:hidden;
+    box-shadow:0 0 0 1px var(--border), 0 20px 60px rgba(0,0,0,0.6);
+    background:#000;
+  }
+  video{
+    position:absolute;
+    top:0;left:0;width:100%;height:100%;
+    object-fit:cover;
+    transform:scaleX(-1);
+    opacity:0.25;
+  }
+  canvas{
+    position:absolute;
+    top:0;left:0;width:100%;height:100%;
+  }
+  #startOverlay{
+    position:absolute;inset:0;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:16px;
+    background:rgba(6,6,10,0.85);
+    backdrop-filter:blur(4px);
+    z-index:10;
+    text-align:center;
+    padding:24px;
+  }
+  #startOverlay h1{
+    font-size:22px;
+    font-weight:600;
+    margin:0;
+    letter-spacing:0.02em;
+  }
+  #startOverlay p{
+    color:var(--muted);
+    font-size:13px;
+    margin:0;
+    max-width:360px;
+    line-height:1.6;
+  }
+  #startBtn{
+    margin-top:8px;
+    padding:12px 28px;
+    border-radius:999px;
+    border:1px solid var(--accent);
+    background:transparent;
+    color:var(--accent);
+    font-size:14px;
+    letter-spacing:0.05em;
+    cursor:pointer;
+    transition:all 0.2s ease;
+  }
+  #startBtn:hover{
+    background:var(--accent);
+    color:#05140c;
+  }
+  #startBtn:disabled{
+    opacity:0.4;
+    cursor:default;
+  }
+  #status{
+    position:absolute;
+    top:12px;left:16px;
+    font-size:11px;
+    color:var(--muted);
+    letter-spacing:0.04em;
+    z-index:5;
+    display:flex;
+    align-items:center;
+    gap:6px;
+  }
+  #status .dot{
+    width:6px;height:6px;border-radius:50%;
+    background:#555;
+  }
+  #status.live .dot{
+    background:var(--accent);
+    box-shadow:0 0 6px var(--accent);
+  }
+  #panel{
+    position:fixed;
+    right:20px;
+    top:50%;
+    transform:translateY(-50%);
+    width:220px;
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:18px 18px 20px;
+    z-index:20;
+    box-shadow:0 12px 40px rgba(0,0,0,0.5);
+  }
+  #panel h2{
+    font-size:11px;
+    text-transform:uppercase;
+    letter-spacing:0.12em;
+    color:var(--muted);
+    margin:0 0 14px;
+    font-weight:600;
+  }
+  .row{
+    margin-bottom:16px;
+  }
+  .row label{
+    display:flex;
+    justify-content:space-between;
+    font-size:12px;
+    color:var(--text);
+    margin-bottom:6px;
+  }
+  .row label span.val{
+    color:var(--accent2);
+    font-variant-numeric:tabular-nums;
+  }
+  input[type=range]{
+    -webkit-appearance:none;
+    width:100%;
+    height:3px;
+    border-radius:2px;
+    background:var(--border);
+    outline:none;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;
+    width:13px;height:13px;
+    border-radius:50%;
+    background:var(--accent2);
+    cursor:pointer;
+    box-shadow:0 0 6px rgba(94,198,255,0.6);
+  }
+  #colorRow{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+  .swatch{
+    width:22px;height:22px;
+    border-radius:50%;
+    cursor:pointer;
+    border:2px solid transparent;
+    transition:transform 0.15s ease;
+  }
+  .swatch:hover{transform:scale(1.15);}
+  .swatch.active{
+    border-color:#fff;
+  }
+  #rainbowToggle, #videoToggle, #soundToggle, #vibratoToggle, #quantizeToggle{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    font-size:12px;
+    color:var(--text);
+    margin-top:10px;
+    cursor:pointer;
+    user-select:none;
+  }
+  #rainbowToggle .sw, #videoToggle .sw, #soundToggle .sw, #vibratoToggle .sw, #quantizeToggle .sw{
+    width:32px;height:18px;
+    border-radius:999px;
+    background:var(--border);
+    position:relative;
+    transition:background 0.2s;
+    flex-shrink:0;
+  }
+  #rainbowToggle .sw::after, #videoToggle .sw::after, #soundToggle .sw::after, #vibratoToggle .sw::after, #quantizeToggle .sw::after{
+    content:"";
+    position:absolute;
+    top:2px;left:2px;
+    width:14px;height:14px;
+    border-radius:50%;
+    background:var(--muted);
+    transition:all 0.2s;
+  }
+  #rainbowToggle.on .sw, #videoToggle.on .sw, #soundToggle.on .sw, #vibratoToggle.on .sw, #quantizeToggle.on .sw{background:var(--accent);}
+  #rainbowToggle.on .sw::after, #videoToggle.on .sw::after, #soundToggle.on .sw::after, #vibratoToggle.on .sw::after, #quantizeToggle.on .sw::after{left:16px;background:#05140c;}
+  #soundSettings{
+    margin-top:4px;
+    padding-top:12px;
+    border-top:1px solid var(--border);
+  }
+  select.selectInput{
+    width:100%;
+    background:var(--bg);
+    color:var(--text);
+    border:1px solid var(--border);
+    border-radius:8px;
+    padding:7px 8px;
+    font-size:12px;
+    font-family:inherit;
+    outline:none;
+    cursor:pointer;
+  }
+  #soundNote{
+    font-size:10px;
+    color:var(--muted);
+    line-height:1.5;
+    margin-top:12px;
+  }
+  #noteDisplay{
+    font-variant-numeric:tabular-nums;
+  }
+  #modeSwitch{
+    display:flex;
+    background:var(--bg);
+    border:1px solid var(--border);
+    border-radius:10px;
+    padding:3px;
+    margin-bottom:18px;
+    gap:3px;
+  }
+  .modeBtn{
+    flex:1;
+    border:none;
+    background:transparent;
+    color:var(--muted);
+    font-size:11px;
+    padding:7px 4px;
+    border-radius:7px;
+    cursor:pointer;
+    transition:all 0.15s ease;
+    font-family:inherit;
+  }
+  .modeBtn.active{
+    background:var(--panel);
+    color:var(--accent);
+    box-shadow:0 0 0 1px var(--border);
+  }
+  .fileBtn{
+    display:block;
+    padding:9px 10px;
+    border-radius:8px;
+    border:1px dashed var(--border);
+    color:var(--accent2);
+    font-size:11px;
+    cursor:pointer;
+    text-align:center;
+    transition:border-color 0.15s;
+  }
+  .fileBtn:hover{border-color:var(--accent2);}
+  #mediaFileName{
+    font-size:10px;
+    color:var(--muted);
+    margin-top:6px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  #mediaNote{
+    font-size:10px;
+    color:var(--muted);
+    line-height:1.5;
+    margin-top:2px;
+  }
+  #fpsNote{
+    font-size:10px;
+    color:var(--muted);
+    margin-top:14px;
+    line-height:1.5;
+    border-top:1px solid var(--border);
+    padding-top:10px;
+  }
+  @media (max-width: 900px){
+    #panel{
+      right:50%;
+      transform:translateX(50%);
+      top:auto;
+      bottom:14px;
+      width:min(92vw,420px);
+    }
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="videoWrap">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="canvas"></canvas>
+    <div id="status"><span class="dot"></span><span id="statusText">未起動</span></div>
+    <div id="startOverlay">
+      <h1>指先パーティクルトラッカー</h1>
+      <p>ウェブカメラで手の動きを検出し、指先からパーティクルを放出します。<br>カメラへのアクセスを許可してください。</p>
+      <button id="startBtn">カメラを起動</button>
+    </div>
+  </div>
+</div>
+
+<div id="panel">
+  <h2>設定</h2>
+  <div id="modeSwitch">
+    <button class="modeBtn active" data-mode="particles">パーティクル</button>
+    <button class="modeBtn" data-mode="media">画像・動画</button>
+  </div>
+
+  <div id="particleSettings">
+    <div class="row">
+      <label>発生量 <span class="val" id="rateVal">4</span></label>
+      <input type="range" id="rate" min="0" max="15" step="1" value="4">
+    </div>
+    <div class="row">
+      <label>サイズ <span class="val" id="sizeVal">6</span></label>
+      <input type="range" id="size" min="1" max="20" step="0.5" value="6">
+    </div>
+    <div class="row">
+      <label>寿命 <span class="val" id="lifeVal">50</span></label>
+      <input type="range" id="life" min="10" max="150" step="5" value="50">
+    </div>
+    <div class="row">
+      <label>色</label>
+      <div id="colorRow">
+        <div class="swatch active" style="background:#7dffb3" data-color="#7dffb3"></div>
+        <div class="swatch" style="background:#5ec6ff" data-color="#5ec6ff"></div>
+        <div class="swatch" style="background:#ff6b9d" data-color="#ff6b9d"></div>
+        <div class="swatch" style="background:#ffd166" data-color="#ffd166"></div>
+        <div class="swatch" style="background:#c77dff" data-color="#c77dff"></div>
+        <div class="swatch" style="background:#ffffff" data-color="#ffffff"></div>
+      </div>
+      <div id="rainbowToggle"><span>虹色モード</span><span class="sw"></span></div>
+    </div>
+  </div>
+
+  <div id="mediaSettings" style="display:none;">
+    <div class="row">
+      <label for="mediaFile" class="fileBtn">画像・動画を選択</label>
+      <input type="file" id="mediaFile" accept="image/*,video/*" style="display:none;">
+      <div id="mediaFileName">未選択</div>
+    </div>
+    <div class="row">
+      <label>基準サイズ <span class="val" id="mediaSizeVal">100</span></label>
+      <input type="range" id="mediaSize" min="20" max="400" step="5" value="100">
+    </div>
+    <div id="mediaNote">手のひらの中心に追従し、指を開閉するとサイズが自動で変化します(握る=小さく、開く=大きく)。透過PNG・透過WebM動画に対応(両手まで)。動画のアルファ表示はブラウザ依存です(Chrome/Edge推奨)。</div>
+  </div>
+
+  <div class="row" style="margin-bottom:0;margin-top:16px;">
+    <label>表示</label>
+    <div id="videoToggle" class="on"><span>カメラ映像</span><span class="sw"></span></div>
+  </div>
+  <div id="fpsNote">指を画面に映すと選択中のモードが追従します。カメラ映像はオフでもトラッキングは継続します。</div>
+
+  <div class="row" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);margin-bottom:0;">
+    <label>テルミン音 <span class="val" id="noteDisplay">--</span></label>
+    <div id="soundToggle"><span>サウンド有効化</span><span class="sw"></span></div>
+  </div>
+  <div id="soundSettings" style="display:none;">
+    <div class="row">
+      <label>波形</label>
+      <select id="waveform" class="selectInput">
+        <option value="sine">サイン波(柔らかい)</option>
+        <option value="triangle">三角波(まろやか)</option>
+        <option value="sawtooth">ノコギリ波(鋭い)</option>
+        <option value="square">矩形波(レトロ)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>音域</label>
+      <select id="pitchRange" class="selectInput">
+        <option value="low">低め (110–440Hz)</option>
+        <option value="mid" selected>標準 (220–880Hz)</option>
+        <option value="high">高め (440–1760Hz)</option>
+        <option value="wide">広め (110–1760Hz)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>最大音量 <span class="val" id="volMaxVal">50</span></label>
+      <input type="range" id="volMax" min="0" max="100" step="5" value="50">
+    </div>
+    <div id="vibratoToggle"><span>ビブラート</span><span class="sw"></span></div>
+    <div id="quantizeToggle" class="on"><span>音階にスナップ</span><span class="sw"></span></div>
+    <div id="soundNote">片手の場合:縦位置で音の高さ、横位置で音量。両手の場合:右側の手で音の高さ、左側の手で音量を操作します(実物のテルミンと同じく、手を離すと無音になります)。</div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script>
+(function(){
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const startBtn = document.getElementById('startBtn');
+  const startOverlay = document.getElementById('startOverlay');
+  const statusEl = document.getElementById('status');
+  const statusText = document.getElementById('statusText');
+
+  const rateInput = document.getElementById('rate');
+  const sizeInput = document.getElementById('size');
+  const lifeInput = document.getElementById('life');
+  const rateVal = document.getElementById('rateVal');
+  const sizeVal = document.getElementById('sizeVal');
+  const lifeVal = document.getElementById('lifeVal');
+  const swatches = document.querySelectorAll('.swatch');
+  const rainbowToggle = document.getElementById('rainbowToggle');
+  const videoToggle = document.getElementById('videoToggle');
+
+  const modeBtns = document.querySelectorAll('.modeBtn');
+  const particleSettings = document.getElementById('particleSettings');
+  const mediaSettings = document.getElementById('mediaSettings');
+  const mediaFileInput = document.getElementById('mediaFile');
+  const mediaFileName = document.getElementById('mediaFileName');
+  const mediaSizeInput = document.getElementById('mediaSize');
+  const mediaSizeVal = document.getElementById('mediaSizeVal');
+
+  const soundToggle = document.getElementById('soundToggle');
+  const soundSettingsPanel = document.getElementById('soundSettings');
+  const waveformSelect = document.getElementById('waveform');
+  const pitchRangeSelect = document.getElementById('pitchRange');
+  const volMaxInput = document.getElementById('volMax');
+  const volMaxVal = document.getElementById('volMaxVal');
+  const vibratoToggle = document.getElementById('vibratoToggle');
+  const quantizeToggle = document.getElementById('quantizeToggle');
+  const noteDisplay = document.getElementById('noteDisplay');
+
+  let settings = {
+    rate: parseFloat(rateInput.value),
+    size: parseFloat(sizeInput.value),
+    life: parseFloat(lifeInput.value),
+    color: '#7dffb3',
+    rainbow: false,
+    mode: 'particles',
+    mediaSize: parseFloat(mediaSizeInput.value)
+  };
+
+  rateInput.addEventListener('input', () => { settings.rate = parseFloat(rateInput.value); rateVal.textContent = rateInput.value; });
+  sizeInput.addEventListener('input', () => { settings.size = parseFloat(sizeInput.value); sizeVal.textContent = sizeInput.value; });
+  lifeInput.addEventListener('input', () => { settings.life = parseFloat(lifeInput.value); lifeVal.textContent = lifeInput.value; });
+
+  swatches.forEach(sw => {
+    sw.addEventListener('click', () => {
+      swatches.forEach(s => s.classList.remove('active'));
+      sw.classList.add('active');
+      settings.color = sw.dataset.color;
+      settings.rainbow = false;
+      rainbowToggle.classList.remove('on');
+    });
+  });
+
+  rainbowToggle.addEventListener('click', () => {
+    settings.rainbow = !settings.rainbow;
+    rainbowToggle.classList.toggle('on', settings.rainbow);
+  });
+
+  let videoVisible = true;
+  videoToggle.addEventListener('click', () => {
+    videoVisible = !videoVisible;
+    videoToggle.classList.toggle('on', videoVisible);
+    video.style.opacity = videoVisible ? '0.25' : '0';
+  });
+
+  modeBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      modeBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      settings.mode = btn.dataset.mode;
+      particleSettings.style.display = settings.mode === 'particles' ? '' : 'none';
+      mediaSettings.style.display = settings.mode === 'media' ? '' : 'none';
+      if (settings.mode === 'media'){
+        particles = [];
+      }
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+    });
+  });
+
+  mediaSizeInput.addEventListener('input', () => {
+    settings.mediaSize = parseFloat(mediaSizeInput.value);
+    mediaSizeVal.textContent = mediaSizeInput.value;
+  });
+
+  // ---------- Theremin sound settings ----------
+  const PITCH_RANGES = {
+    low:  [110, 440],
+    mid:  [220, 880],
+    high: [440, 1760],
+    wide: [110, 1760]
+  };
+  let soundSettings = {
+    enabled: false,
+    waveform: 'sine',
+    rangeLow: 220,
+    rangeHigh: 880,
+    vibrato: false,
+    quantize: true,
+    volMax: 0.5
+  };
+
+  soundToggle.addEventListener('click', async () => {
+    soundSettings.enabled = !soundSettings.enabled;
+    soundToggle.classList.toggle('on', soundSettings.enabled);
+    soundSettingsPanel.style.display = soundSettings.enabled ? '' : 'none';
+    if (soundSettings.enabled){
+      if (!audioCtx) initAudio();
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+    } else if (masterGain && audioCtx){
+      masterGain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+      noteDisplay.textContent = '--';
+    }
+  });
+
+  waveformSelect.addEventListener('change', () => {
+    soundSettings.waveform = waveformSelect.value;
+    if (osc) osc.type = soundSettings.waveform;
+  });
+
+  pitchRangeSelect.addEventListener('change', () => {
+    const [lo, hi] = PITCH_RANGES[pitchRangeSelect.value];
+    soundSettings.rangeLow = lo;
+    soundSettings.rangeHigh = hi;
+  });
+
+  volMaxInput.addEventListener('input', () => {
+    soundSettings.volMax = parseFloat(volMaxInput.value) / 100;
+    volMaxVal.textContent = volMaxInput.value;
+  });
+
+  vibratoToggle.addEventListener('click', () => {
+    soundSettings.vibrato = !soundSettings.vibrato;
+    vibratoToggle.classList.toggle('on', soundSettings.vibrato);
+    if (vibratoGain && audioCtx){
+      vibratoGain.gain.setTargetAtTime(soundSettings.vibrato ? 6 : 0, audioCtx.currentTime, 0.05);
+    }
+  });
+
+  quantizeToggle.addEventListener('click', () => {
+    soundSettings.quantize = !soundSettings.quantize;
+    quantizeToggle.classList.toggle('on', soundSettings.quantize);
+  });
+
+  // ---------- Media asset (image / alpha video) ----------
+  let mediaAsset = null; // {type:'image'|'video', el, ratio}
+
+  mediaFileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    mediaFileName.textContent = file.name;
+
+    if (file.type.startsWith('image/')){
+      const img = new Image();
+      img.onload = () => {
+        mediaAsset = { type: 'image', el: img, ratio: img.naturalWidth / img.naturalHeight || 1 };
+      };
+      img.onerror = () => { mediaFileName.textContent = '読み込み失敗: ' + file.name; };
+      img.src = url;
+    } else if (file.type.startsWith('video/')){
+      const vid = document.createElement('video');
+      vid.muted = true;
+      vid.loop = true;
+      vid.playsInline = true;
+      vid.autoplay = true;
+      vid.addEventListener('loadeddata', () => {
+        mediaAsset = { type: 'video', el: vid, ratio: (vid.videoWidth / vid.videoHeight) || 1 };
+        vid.play().catch(() => {});
+      });
+      vid.addEventListener('error', () => { mediaFileName.textContent = '読み込み失敗: ' + file.name; });
+      vid.src = url;
+    } else {
+      mediaFileName.textContent = '未対応の形式です';
+    }
+  });
+
+  // ---------- Particle system ----------
+  let particles = [];
+  let hue = 0;
+
+  function hexToRgb(hex){
+    const v = parseInt(hex.slice(1),16);
+    return [(v>>16)&255,(v>>8)&255,v&255];
+  }
+
+  function spawnParticle(x, y, vxBase, vyBase){
+    let color;
+    if (settings.rainbow){
+      color = `hsl(${hue % 360}, 90%, 65%)`;
+    } else {
+      const [r,g,b] = hexToRgb(settings.color);
+      color = `rgb(${r},${g},${b})`;
+    }
+    const angle = Math.random()*Math.PI*2;
+    const speed = 0.4 + Math.random()*1.2;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle)*speed + vxBase*0.15,
+      vy: Math.sin(angle)*speed + vyBase*0.15,
+      life: settings.life,
+      maxLife: settings.life,
+      size: settings.size * (0.6 + Math.random()*0.7),
+      color
+    });
+  }
+
+  function updateParticles(){
+    for (let i = particles.length-1; i>=0; i--){
+      const p = particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vx *= 0.98;
+      p.vy *= 0.98;
+      p.vy += 0.01; // slight gravity
+      p.life -= 1;
+      if (p.life <= 0){
+        particles.splice(i,1);
+      }
+    }
+    // cap for performance
+    if (particles.length > 2500){
+      particles.splice(0, particles.length - 2500);
+    }
+  }
+
+  function drawParticles(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    for (const p of particles){
+      const t = p.life / p.maxLife;
+      ctx.globalAlpha = Math.max(t, 0);
+      ctx.beginPath();
+      ctx.fillStyle = p.color;
+      ctx.shadowColor = p.color;
+      ctx.shadowBlur = p.size * 1.5;
+      ctx.arc(p.x, p.y, p.size * t, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+  }
+
+  function drawMedia(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    if (!mediaAsset) return;
+    const src = mediaAsset.el;
+    if (mediaAsset.type === 'video' && src.readyState < 2) return;
+    for (const t of mediaTargets){
+      const w = settings.mediaSize * t.scale;
+      const h = w / (mediaAsset.ratio || 1);
+      ctx.drawImage(src, t.x - w/2, t.y - h/2, w, h);
+    }
+  }
+
+  function resizeCanvas(){
+    const rect = video.getBoundingClientRect();
+    canvas.width = rect.width;
+    canvas.height = rect.height;
+  }
+  window.addEventListener('resize', resizeCanvas);
+
+  // ---------- Theremin audio engine ----------
+  let audioCtx = null;
+  let masterGain = null;
+  let osc = null;
+  let vibratoOsc = null;
+  let vibratoGain = null;
+
+  function initAudio(){
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0;
+    masterGain.connect(audioCtx.destination);
+
+    osc = audioCtx.createOscillator();
+    osc.type = soundSettings.waveform;
+    osc.frequency.value = 440;
+    osc.connect(masterGain);
+    osc.start();
+
+    // subtle vibrato LFO, depth controlled by the vibrato toggle
+    vibratoOsc = audioCtx.createOscillator();
+    vibratoOsc.frequency.value = 5.5;
+    vibratoGain = audioCtx.createGain();
+    vibratoGain.gain.value = soundSettings.vibrato ? 6 : 0;
+    vibratoOsc.connect(vibratoGain);
+    vibratoGain.connect(osc.frequency);
+    vibratoOsc.start();
+  }
+
+  const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  function freqToNoteName(freq){
+    const midi = 69 + 12 * Math.log2(freq / 440);
+    const rounded = Math.round(midi);
+    const name = NOTE_NAMES[((rounded % 12) + 12) % 12];
+    const octave = Math.floor(rounded / 12) - 1;
+    return name + octave;
+  }
+
+  const PENTATONIC = [0, 2, 4, 7, 9]; // major pentatonic: sounds pleasant with any combination
+  function quantizeFreq(freq){
+    const midi = 69 + 12 * Math.log2(freq / 440);
+    const octaveRoot = Math.floor(midi / 12) * 12;
+    let best = midi, bestDiff = Infinity;
+    for (let o = -1; o <= 1; o++){
+      for (const p of PENTATONIC){
+        const candidate = octaveRoot + o * 12 + p;
+        const diff = Math.abs(candidate - midi);
+        if (diff < bestDiff){ bestDiff = diff; best = candidate; }
+      }
+    }
+    return 440 * Math.pow(2, (best - 69) / 12);
+  }
+
+  // pitchHand / volHand: {x, y} in canvas pixel coords, or null if not present
+  function updateTheremin(pitchHand, volHand){
+    if (!soundSettings.enabled || !audioCtx) return;
+    const now = audioCtx.currentTime;
+
+    if (!pitchHand){
+      masterGain.gain.setTargetAtTime(0, now, 0.08);
+      noteDisplay.textContent = '--';
+      return;
+    }
+
+    // vertical position -> pitch, log scale so equal screen distance = equal musical interval
+    const yNorm = Math.max(0, Math.min(1, 1 - (pitchHand.y / canvas.height)));
+    const logLow = Math.log(soundSettings.rangeLow);
+    const logHigh = Math.log(soundSettings.rangeHigh);
+    let freq = Math.exp(logLow + (logHigh - logLow) * yNorm);
+    if (soundSettings.quantize) freq = quantizeFreq(freq);
+    osc.frequency.setTargetAtTime(freq, now, 0.03);
+
+    // volume: second hand's vertical position, or first hand's horizontal position solo
+    let volNorm;
+    if (volHand){
+      volNorm = 1 - (volHand.y / canvas.height);
+    } else {
+      volNorm = 1 - (pitchHand.x / canvas.width);
+    }
+    volNorm = Math.max(0, Math.min(1, volNorm));
+    masterGain.gain.setTargetAtTime(volNorm * soundSettings.volMax, now, 0.05);
+
+    noteDisplay.textContent = freqToNoteName(freq) + ' ' + Math.round(freq) + 'Hz';
+  }
+
+  // ---------- Fingertip tracking ----------
+  const FINGERTIPS = [4, 8, 12, 16, 20]; // thumb, index, middle, ring, pinky
+  let lastPositions = {};
+  let mediaTargets = [];
+
+  function onResults(results){
+    hue += 1.5;
+    mediaTargets = [];
+    if (results.multiHandLandmarks){
+      results.multiHandLandmarks.forEach((landmarks, handIdx) => {
+        FINGERTIPS.forEach((idx, fi) => {
+          const lm = landmarks[idx];
+          // mirror x because video is mirrored
+          const x = (1 - lm.x) * canvas.width;
+          const y = lm.y * canvas.height;
+
+          const key = fi + '_' + handIdx;
+          const prev = lastPositions[key] || {x, y};
+          const vx = x - prev.x;
+          const vy = y - prev.y;
+          lastPositions[key] = {x, y};
+
+          if (settings.mode === 'particles'){
+            const emitCount = settings.rate;
+            const whole = Math.floor(emitCount);
+            const frac = emitCount - whole;
+            for (let i=0;i<whole;i++){
+              spawnParticle(x, y, vx, vy);
+            }
+            if (Math.random() < frac){
+              spawnParticle(x, y, vx, vy);
+            }
+          }
+        });
+
+        // --- 手のひら中心と、指の開閉具合(openness)を計算 ---
+        const palmIdxs = [0, 5, 9, 13, 17]; // 手首 + 各指の付け根
+        let px = 0, py = 0;
+        palmIdxs.forEach(i => { px += landmarks[i].x; py += landmarks[i].y; });
+        px /= palmIdxs.length;
+        py /= palmIdxs.length;
+        const cx = (1 - px) * canvas.width;
+        const cy = py * canvas.height;
+
+        // 手首〜中指付け根の距離を「手のスケール基準」にして、カメラとの距離差を吸収
+        const wrist = landmarks[0];
+        const midMcp = landmarks[9];
+        const handScale = Math.hypot(wrist.x - midMcp.x, wrist.y - midMcp.y) || 0.001;
+
+        const tipIdxs = [4, 8, 12, 16, 20];
+        let spreadSum = 0;
+        tipIdxs.forEach(i => {
+          const tip = landmarks[i];
+          spreadSum += Math.hypot(tip.x - px, tip.y - py);
+        });
+        const normSpread = (spreadSum / tipIdxs.length) / handScale;
+
+        // 握り込み〜全開の目安レンジで 0〜1 に正規化(環境差はある程度許容)
+        const closedRef = 1.0;
+        const openRef = 2.6;
+        let openness = (normSpread - closedRef) / (openRef - closedRef);
+        openness = Math.max(0, Math.min(1, openness));
+
+        const scale = 0.35 + openness * 1.4; // 握る=0.35倍 / 全開=1.75倍
+
+        mediaTargets.push({ x: cx, y: cy, scale });
+      });
+    }
+
+    // ---------- Theremin: assign hands to pitch/volume ----------
+    if (mediaTargets.length === 0){
+      updateTheremin(null, null);
+    } else if (mediaTargets.length === 1){
+      updateTheremin(mediaTargets[0], null);
+    } else {
+      const sorted = [...mediaTargets].sort((a, b) => b.x - a.x); // rightmost (mirrored) = pitch hand
+      updateTheremin(sorted[0], sorted[1]);
+    }
+  }
+
+  let hands;
+  let camStream;
+  let running = false;
+
+  async function start(){
+    startBtn.disabled = true;
+    startBtn.textContent = '起動中...';
+    try {
+      camStream = await navigator.mediaDevices.getUserMedia({ video: { width: 960, height: 540, facingMode: 'user' } });
+      video.srcObject = camStream;
+      await video.play();
+      resizeCanvas();
+
+      hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+      });
+      hands.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.5
+      });
+      hands.onResults(onResults);
+
+      running = true;
+      startOverlay.style.display = 'none';
+      statusEl.classList.add('live');
+      statusText.textContent = 'トラッキング中';
+
+      detectLoop();
+      animLoop();
+    } catch (err){
+      statusText.textContent = 'カメラエラー: ' + err.message;
+      startBtn.disabled = false;
+      startBtn.textContent = 'もう一度試す';
+    }
+  }
+
+  async function detectLoop(){
+    if (!running) return;
+    if (video.readyState >= 2){
+      await hands.send({image: video});
+    }
+    requestAnimationFrame(detectLoop);
+  }
+
+  function animLoop(){
+    if (!running) return;
+    if (settings.mode === 'particles'){
+      updateParticles();
+      drawParticles();
+    } else {
+      drawMedia();
+    }
+    requestAnimationFrame(animLoop);
+  }
+
+  startBtn.addEventListener('click', start);
+})();
+</script>
+</body>
+</html>
