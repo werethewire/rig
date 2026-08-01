@@ -93,24 +93,12 @@
     opacity:0.4;
     cursor:default;
   }
-  #status{
-    position:absolute;
-    top:12px;left:16px;
-    font-size:11px;
-    color:var(--muted);
-    letter-spacing:0.04em;
-    z-index:5;
-    display:flex;
-    align-items:center;
-    gap:6px;
-  }
-  #status .dot{
-    width:6px;height:6px;border-radius:50%;
-    background:#555;
-  }
-  #status.live .dot{
-    background:var(--accent);
-    box-shadow:0 0 6px var(--accent);
+  #errorMsg{
+    color:#ff6b9d;
+    font-size:12px;
+    line-height:1.5;
+    margin:2px 0 0;
+    max-width:360px;
   }
   #panel{
     position:fixed;
@@ -231,6 +219,20 @@
     line-height:1.5;
     margin-top:12px;
   }
+  #sampleFileName{
+    font-size:10px;
+    color:var(--muted);
+    margin-top:6px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  #sampleNote{
+    font-size:10px;
+    color:var(--muted);
+    line-height:1.5;
+    margin-top:8px;
+  }
   #noteDisplay{
     font-variant-numeric:tabular-nums;
   }
@@ -248,8 +250,8 @@
     border:none;
     background:transparent;
     color:var(--muted);
-    font-size:11px;
-    padding:7px 4px;
+    font-size:10.5px;
+    padding:7px 3px;
     border-radius:7px;
     cursor:pointer;
     transition:all 0.15s ease;
@@ -310,11 +312,11 @@
   <div id="videoWrap">
     <video id="video" playsinline autoplay muted></video>
     <canvas id="canvas"></canvas>
-    <div id="status"><span class="dot"></span><span id="statusText">未起動</span></div>
     <div id="startOverlay">
       <h1>指先パーティクルトラッカー</h1>
       <p>ウェブカメラで手の動きを検出し、指先からパーティクルを放出します。<br>カメラへのアクセスを許可してください。</p>
       <button id="startBtn">カメラを起動</button>
+      <p id="errorMsg" style="display:none;"></p>
     </div>
   </div>
 </div>
@@ -324,6 +326,7 @@
   <div id="modeSwitch">
     <button class="modeBtn active" data-mode="particles">パーティクル</button>
     <button class="modeBtn" data-mode="media">画像・動画</button>
+    <button class="modeBtn" data-mode="sound">テルミンのみ</button>
   </div>
 
   <div id="particleSettings">
@@ -378,6 +381,13 @@
   </div>
   <div id="soundSettings" style="display:none;">
     <div class="row">
+      <label>音源</label>
+      <select id="sourceType" class="selectInput">
+        <option value="oscillator" selected>オシレーター(波形)</option>
+        <option value="sample">音声ファイル(WAV/MP3)</option>
+      </select>
+    </div>
+    <div class="row" id="waveformRow">
       <label>波形</label>
       <select id="waveform" class="selectInput">
         <option value="sine">サイン波(柔らかい)</option>
@@ -386,13 +396,19 @@
         <option value="square">矩形波(レトロ)</option>
       </select>
     </div>
+    <div class="row" id="sampleRow" style="display:none;">
+      <label for="sampleFile" class="fileBtn">音声ファイルを選択</label>
+      <input type="file" id="sampleFile" accept="audio/*,.wav,.mp3" style="display:none;">
+      <div id="sampleFileName">未選択</div>
+      <div id="sampleNote">選んだ音声はループ再生され、指の高さで再生速度(ピッチ)、音量担当の手で音量を操作します。ファイルはブラウザ内で処理され、外部には送信されません。</div>
+    </div>
     <div class="row">
       <label>音域</label>
       <select id="pitchRange" class="selectInput">
-        <option value="low">低め (110–440Hz)</option>
-        <option value="mid" selected>標準 (220–880Hz)</option>
-        <option value="high">高め (440–1760Hz)</option>
-        <option value="wide">広め (110–1760Hz)</option>
+        <option value="low">低め (-2〜0 oct)</option>
+        <option value="mid" selected>標準 (-1〜+1 oct)</option>
+        <option value="high">高め (0〜+2 oct)</option>
+        <option value="wide">広め (-2〜+2 oct)</option>
       </select>
     </div>
     <div class="row">
@@ -413,8 +429,7 @@
   const ctx = canvas.getContext('2d');
   const startBtn = document.getElementById('startBtn');
   const startOverlay = document.getElementById('startOverlay');
-  const statusEl = document.getElementById('status');
-  const statusText = document.getElementById('statusText');
+  const errorMsg = document.getElementById('errorMsg');
 
   const rateInput = document.getElementById('rate');
   const sizeInput = document.getElementById('size');
@@ -436,7 +451,12 @@
 
   const soundToggle = document.getElementById('soundToggle');
   const soundSettingsPanel = document.getElementById('soundSettings');
+  const sourceTypeSelect = document.getElementById('sourceType');
+  const waveformRow = document.getElementById('waveformRow');
+  const sampleRow = document.getElementById('sampleRow');
   const waveformSelect = document.getElementById('waveform');
+  const sampleFileInput = document.getElementById('sampleFile');
+  const sampleFileName = document.getElementById('sampleFileName');
   const pitchRangeSelect = document.getElementById('pitchRange');
   const volMaxInput = document.getElementById('volMax');
   const volMaxVal = document.getElementById('volMaxVal');
@@ -481,16 +501,26 @@
   });
 
   modeBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       modeBtns.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       settings.mode = btn.dataset.mode;
       particleSettings.style.display = settings.mode === 'particles' ? '' : 'none';
       mediaSettings.style.display = settings.mode === 'media' ? '' : 'none';
-      if (settings.mode === 'media'){
+      if (settings.mode !== 'particles'){
         particles = [];
       }
       ctx.clearRect(0,0,canvas.width,canvas.height);
+
+      // 「テルミンのみ」モードでは、パーティクル・画像追従は上のdisplay制御で自動的に停止する。
+      // ここではサウンドをまだ有効化していない場合のみ自動でオンにする(既にオンならそのまま維持)。
+      if (settings.mode === 'sound' && !soundSettings.enabled){
+        soundSettings.enabled = true;
+        soundToggle.classList.add('on');
+        soundSettingsPanel.style.display = '';
+        if (!audioCtx) initAudio();
+        if (audioCtx.state === 'suspended') await audioCtx.resume();
+      }
     });
   });
 
@@ -500,17 +530,20 @@
   });
 
   // ---------- Theremin sound settings ----------
-  const PITCH_RANGES = {
-    low:  [110, 440],
-    mid:  [220, 880],
-    high: [440, 1760],
-    wide: [110, 1760]
+  // 音域は絶対Hzではなく「オクターブのオフセット」で管理する。
+  // オシレーターは 440Hz × 2^oct、音声ファイルは 再生速度 = 2^oct として同じ表現を共用できる。
+  const PITCH_PRESETS = {
+    low:  [-2, 0],
+    mid:  [-1, 1],
+    high: [0, 2],
+    wide: [-2, 2]
   };
   let soundSettings = {
     enabled: false,
+    sourceType: 'oscillator', // 'oscillator' | 'sample'
     waveform: 'sine',
-    rangeLow: 220,
-    rangeHigh: 880,
+    octaveLow: -1,
+    octaveHigh: 1,
     vibrato: false,
     quantize: true,
     volMax: 0.5
@@ -529,15 +562,52 @@
     }
   });
 
+  sourceTypeSelect.addEventListener('change', () => {
+    soundSettings.sourceType = sourceTypeSelect.value;
+    waveformRow.style.display = soundSettings.sourceType === 'oscillator' ? '' : 'none';
+    sampleRow.style.display = soundSettings.sourceType === 'sample' ? '' : 'none';
+    switchActiveSource();
+  });
+
   waveformSelect.addEventListener('change', () => {
     soundSettings.waveform = waveformSelect.value;
     if (osc) osc.type = soundSettings.waveform;
   });
 
+  sampleFileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    sampleFileName.textContent = '読み込み中... ' + file.name;
+    try {
+      if (!audioCtx) initAudio();
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+      const arrayBuffer = await file.arrayBuffer();
+      const buffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+      // 既存のサンプル再生を止めてから差し替える
+      if (sampleSource){
+        try { sampleSource.stop(); } catch(err){}
+        try { sampleSource.disconnect(); } catch(err){}
+      }
+      sampleBuffer = buffer;
+      sampleSource = audioCtx.createBufferSource();
+      sampleSource.buffer = sampleBuffer;
+      sampleSource.loop = true;
+      sampleSource.start();
+
+      sampleFileName.textContent = file.name;
+      if (soundSettings.sourceType === 'sample'){
+        switchActiveSource();
+      }
+    } catch (err){
+      sampleFileName.textContent = '読み込み失敗: ' + file.name + '(' + err.message + ')';
+    }
+  });
+
   pitchRangeSelect.addEventListener('change', () => {
-    const [lo, hi] = PITCH_RANGES[pitchRangeSelect.value];
-    soundSettings.rangeLow = lo;
-    soundSettings.rangeHigh = hi;
+    const [lo, hi] = PITCH_PRESETS[pitchRangeSelect.value];
+    soundSettings.octaveLow = lo;
+    soundSettings.octaveHigh = hi;
   });
 
   volMaxInput.addEventListener('input', () => {
@@ -549,7 +619,10 @@
     soundSettings.vibrato = !soundSettings.vibrato;
     vibratoToggle.classList.toggle('on', soundSettings.vibrato);
     if (vibratoGain && audioCtx){
-      vibratoGain.gain.setTargetAtTime(soundSettings.vibrato ? 6 : 0, audioCtx.currentTime, 0.05);
+      const depth = soundSettings.vibrato
+        ? (soundSettings.sourceType === 'sample' ? VIBRATO_DEPTH_RATE : VIBRATO_DEPTH_HZ)
+        : 0;
+      vibratoGain.gain.setTargetAtTime(depth, audioCtx.currentTime, 0.05);
     }
   });
 
@@ -634,26 +707,33 @@
         particles.splice(i,1);
       }
     }
-    // cap for performance
-    if (particles.length > 2500){
-      particles.splice(0, particles.length - 2500);
+    // cap for performance(両手×5指で発生点が最大10箇所になるため、上限を引き下げて安全マージンを確保)
+    if (particles.length > 1500){
+      particles.splice(0, particles.length - 1500);
     }
   }
 
   function drawParticles(){
+    // shadowBlurは1粒ごとにガウスぼかしを計算するため非常に重く、フリーズの主因になりやすい。
+    // 外側の薄い円+内側の濃い円の2層描画に置き換え、見た目の柔らかさを保ちつつ大幅に軽量化する。
     ctx.clearRect(0,0,canvas.width,canvas.height);
     for (const p of particles){
       const t = p.life / p.maxLife;
-      ctx.globalAlpha = Math.max(t, 0);
-      ctx.beginPath();
+      if (t <= 0) continue;
+      const r = p.size * t;
       ctx.fillStyle = p.color;
-      ctx.shadowColor = p.color;
-      ctx.shadowBlur = p.size * 1.5;
-      ctx.arc(p.x, p.y, p.size * t, 0, Math.PI*2);
+
+      ctx.globalAlpha = t * 0.22;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r * 2.2, 0, Math.PI*2);
+      ctx.fill();
+
+      ctx.globalAlpha = t;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI*2);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
-    ctx.shadowBlur = 0;
   }
 
   function drawMedia(){
@@ -668,6 +748,33 @@
     }
   }
 
+  // 「テルミンのみ」モード用の最小限の可視化。
+  // パーティクルや画像追従は完全にオフだが、手が認識されているかを確認できるよう
+  // ピッチ担当/音量担当の手にそれぞれ1つずつ軽量なドットだけ表示する。
+  function drawThereminVisual(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    if (mediaTargets.length === 0) return;
+    let pitchHand, volHand;
+    if (mediaTargets.length >= 2){
+      const a = mediaTargets[0], b = mediaTargets[1];
+      if (a.x >= b.x){ pitchHand = a; volHand = b; } else { pitchHand = b; volHand = a; }
+    } else {
+      pitchHand = mediaTargets[0];
+      volHand = null;
+    }
+    drawSoftDot(pitchHand.x, pitchHand.y, 16, '#7dffb3');
+    if (volHand) drawSoftDot(volHand.x, volHand.y, 16, '#5ec6ff');
+  }
+
+  function drawSoftDot(x, y, r, color){
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.22;
+    ctx.beginPath(); ctx.arc(x, y, r * 2, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = 0.9;
+    ctx.beginPath(); ctx.arc(x, y, r * 0.45, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
   function resizeCanvas(){
     const rect = video.getBoundingClientRect();
     canvas.width = rect.width;
@@ -678,9 +785,17 @@
   // ---------- Theremin audio engine ----------
   let audioCtx = null;
   let masterGain = null;
-  let osc = null;
+  let osc = null;                 // オシレーター音源(常時稼働、未接続時は無音)
   let vibratoOsc = null;
   let vibratoGain = null;
+  let sampleBuffer = null;        // デコード済みの音声ファイル
+  let sampleSource = null;        // AudioBufferSourceNode(ループ再生中)
+  let activeSourceNode = null;    // 現在masterGainに接続されている音源ノード
+
+  // ビブラートは対象パラメータによって意味が全く異なるため、深さを分けて管理する。
+  // オシレーター: 周波数(Hz)への絶対オフセット / 音声ファイル: 再生速度への割合オフセット
+  const VIBRATO_DEPTH_HZ = 6;
+  const VIBRATO_DEPTH_RATE = 0.03;
 
   function initAudio(){
     if (audioCtx) return;
@@ -693,17 +808,51 @@
     osc = audioCtx.createOscillator();
     osc.type = soundSettings.waveform;
     osc.frequency.value = 440;
-    osc.connect(masterGain);
-    osc.start();
+    osc.start(); // まだmasterGainには繋がない(switchActiveSourceが接続を管理する)
 
-    // subtle vibrato LFO, depth controlled by the vibrato toggle
+    // 微妙なビブラートLFO。接続先はswitchActiveSourceで音源に応じて切り替える
     vibratoOsc = audioCtx.createOscillator();
     vibratoOsc.frequency.value = 5.5;
     vibratoGain = audioCtx.createGain();
-    vibratoGain.gain.value = soundSettings.vibrato ? 6 : 0;
+    vibratoGain.gain.value = 0;
     vibratoOsc.connect(vibratoGain);
-    vibratoGain.connect(osc.frequency);
     vibratoOsc.start();
+
+    switchActiveSource();
+  }
+
+  // 音源タイプ(オシレーター/音声ファイル)の切り替え。
+  // masterGainへの接続とビブラートLFOの接続先・深さをまとめて張り替える。
+  function switchActiveSource(){
+    if (!audioCtx) return;
+    try { vibratoGain.disconnect(); } catch(err){}
+    if (activeSourceNode){
+      try { activeSourceNode.disconnect(); } catch(err){}
+      activeSourceNode = null;
+    }
+
+    let targetParam = null;
+    if (soundSettings.sourceType === 'sample'){
+      if (sampleSource){
+        sampleSource.connect(masterGain);
+        activeSourceNode = sampleSource;
+        targetParam = sampleSource.playbackRate;
+      } else {
+        noteDisplay.textContent = '音声ファイル未選択';
+      }
+    } else {
+      osc.connect(masterGain);
+      activeSourceNode = osc;
+      targetParam = osc.frequency;
+    }
+
+    if (targetParam){
+      vibratoGain.connect(targetParam);
+      const depth = soundSettings.vibrato
+        ? (soundSettings.sourceType === 'sample' ? VIBRATO_DEPTH_RATE : VIBRATO_DEPTH_HZ)
+        : 0;
+      vibratoGain.gain.setTargetAtTime(depth, audioCtx.currentTime, 0.02);
+    }
   }
 
   const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
@@ -713,6 +862,14 @@
     const name = NOTE_NAMES[((rounded % 12) + 12) % 12];
     const octave = Math.floor(rounded / 12) - 1;
     return name + octave;
+  }
+
+  // 再生速度(倍率)を「原音から何半音ずれているか」の表記に変換する。
+  // 音声ファイルは元の音高が不定なので、絶対音名ではなく相対表記の方が分かりやすい。
+  function rateToSemitoneLabel(rate){
+    const semis = 12 * Math.log2(rate);
+    const sign = semis >= 0 ? '+' : '';
+    return sign + semis.toFixed(1) + 'st (×' + rate.toFixed(2) + ')';
   }
 
   const PENTATONIC = [0, 2, 4, 7, 9]; // major pentatonic: sounds pleasant with any combination
@@ -730,9 +887,18 @@
     return 440 * Math.pow(2, (best - 69) / 12);
   }
 
+  // 検出は最大60回/秒呼ばれ得るが、音のパラメータ更新はそこまでの頻度が不要なため
+  // 約25Hzに間引いて、検出処理と描画処理により多くの処理時間を残す。
+  const AUDIO_UPDATE_INTERVAL = 40; // ms
+  let lastAudioUpdate = 0;
+
   // pitchHand / volHand: {x, y} in canvas pixel coords, or null if not present
   function updateTheremin(pitchHand, volHand){
     if (!soundSettings.enabled || !audioCtx) return;
+    const nowMs = performance.now();
+    if (nowMs - lastAudioUpdate < AUDIO_UPDATE_INTERVAL) return;
+    lastAudioUpdate = nowMs;
+
     const now = audioCtx.currentTime;
 
     if (!pitchHand){
@@ -740,14 +906,6 @@
       noteDisplay.textContent = '--';
       return;
     }
-
-    // vertical position -> pitch, log scale so equal screen distance = equal musical interval
-    const yNorm = Math.max(0, Math.min(1, 1 - (pitchHand.y / canvas.height)));
-    const logLow = Math.log(soundSettings.rangeLow);
-    const logHigh = Math.log(soundSettings.rangeHigh);
-    let freq = Math.exp(logLow + (logHigh - logLow) * yNorm);
-    if (soundSettings.quantize) freq = quantizeFreq(freq);
-    osc.frequency.setTargetAtTime(freq, now, 0.03);
 
     // volume: second hand's vertical position, or first hand's horizontal position solo
     let volNorm;
@@ -759,7 +917,26 @@
     volNorm = Math.max(0, Math.min(1, volNorm));
     masterGain.gain.setTargetAtTime(volNorm * soundSettings.volMax, now, 0.05);
 
-    noteDisplay.textContent = freqToNoteName(freq) + ' ' + Math.round(freq) + 'Hz';
+    // pitch: vertical position -> オクターブオフセット(音源タイプに関わらず共通の表現)
+    const yNorm = Math.max(0, Math.min(1, 1 - (pitchHand.y / canvas.height)));
+    const octave = soundSettings.octaveLow + (soundSettings.octaveHigh - soundSettings.octaveLow) * yNorm;
+
+    if (soundSettings.sourceType === 'sample'){
+      if (!sampleSource){
+        noteDisplay.textContent = '音声ファイル未選択';
+        return;
+      }
+      let rate = Math.pow(2, octave);
+      if (soundSettings.quantize) rate = quantizeFreq(440 * rate) / 440;
+      rate = Math.max(0.05, rate);
+      sampleSource.playbackRate.setTargetAtTime(rate, now, 0.03);
+      noteDisplay.textContent = rateToSemitoneLabel(rate);
+    } else {
+      let freq = 440 * Math.pow(2, octave);
+      if (soundSettings.quantize) freq = quantizeFreq(freq);
+      osc.frequency.setTargetAtTime(freq, now, 0.03);
+      noteDisplay.textContent = freqToNoteName(freq) + ' ' + Math.round(freq) + 'Hz';
+    }
   }
 
   // ---------- Fingertip tracking ----------
@@ -832,13 +1009,15 @@
     }
 
     // ---------- Theremin: assign hands to pitch/volume ----------
+    // 配列コピー+sort()は検出フレームごと(最大60回/秒)に走ると無駄が大きいため、
+    // 手は最大2つなので直接比較で済ませる。
     if (mediaTargets.length === 0){
       updateTheremin(null, null);
     } else if (mediaTargets.length === 1){
       updateTheremin(mediaTargets[0], null);
     } else {
-      const sorted = [...mediaTargets].sort((a, b) => b.x - a.x); // rightmost (mirrored) = pitch hand
-      updateTheremin(sorted[0], sorted[1]);
+      const a = mediaTargets[0], b = mediaTargets[1];
+      if (a.x >= b.x) updateTheremin(a, b); else updateTheremin(b, a); // 右側(鏡像)=ピッチ担当
     }
   }
 
@@ -849,6 +1028,7 @@
   async function start(){
     startBtn.disabled = true;
     startBtn.textContent = '起動中...';
+    errorMsg.style.display = 'none';
     try {
       camStream = await navigator.mediaDevices.getUserMedia({ video: { width: 960, height: 540, facingMode: 'user' } });
       video.srcObject = camStream;
@@ -860,7 +1040,7 @@
       });
       hands.setOptions({
         maxNumHands: 2,
-        modelComplexity: 1,
+        modelComplexity: 0, // liteモデル: 精度をわずかに落として処理負荷を大幅に下げ、両手トラッキングを安定させる
         minDetectionConfidence: 0.6,
         minTrackingConfidence: 0.5
       });
@@ -868,13 +1048,12 @@
 
       running = true;
       startOverlay.style.display = 'none';
-      statusEl.classList.add('live');
-      statusText.textContent = 'トラッキング中';
 
       detectLoop();
       animLoop();
     } catch (err){
-      statusText.textContent = 'カメラエラー: ' + err.message;
+      errorMsg.textContent = 'カメラエラー: ' + err.message;
+      errorMsg.style.display = '';
       startBtn.disabled = false;
       startBtn.textContent = 'もう一度試す';
     }
@@ -893,8 +1072,10 @@
     if (settings.mode === 'particles'){
       updateParticles();
       drawParticles();
-    } else {
+    } else if (settings.mode === 'media'){
       drawMedia();
+    } else if (settings.mode === 'sound'){
+      drawThereminVisual();
     }
     requestAnimationFrame(animLoop);
   }
