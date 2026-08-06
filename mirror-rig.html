@@ -109,6 +109,27 @@
   #viewport canvas{ display:block; width:100%; height:100%; cursor: grab; }
   #viewport canvas:active{ cursor: grabbing; }
 
+  /* When the background mode is "transparent" the WebGL canvas itself has a
+     zero-alpha clear color, so whatever sits behind it shows through. This
+     checkerboard makes that transparency visible in-app (the same convention
+     image editors use) and is only applied in that mode. */
+  #viewport-wrap.bg-transparent{
+    background-color:#20242c;
+    background-image:
+      linear-gradient(45deg, #2b3038 25%, transparent 25%, transparent 75%, #2b3038 75%),
+      linear-gradient(45deg, #2b3038 25%, transparent 25%, transparent 75%, #2b3038 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 10px 10px;
+  }
+
+  .toggle-row select{
+    background:#161b23; color:var(--text);
+    border:1px solid #2a3340; border-radius:6px;
+    padding:5px 8px; font-size:11.5px; letter-spacing:0.03em;
+    cursor:pointer; outline:none;
+  }
+  .toggle-row select:focus{ border-color:var(--accent); }
+
   .viewport-hint{
     position:absolute; left:12px; bottom:12px;
     font-size:10.5px; color: var(--text-dim);
@@ -310,6 +331,15 @@
           <span>アイドル時に自動回転</span>
           <label class="switch"><input type="checkbox" id="autoRotateToggle" checked><span class="slider"></span></label>
         </div>
+        <div class="toggle-row">
+          <span>背景</span>
+          <select id="bgModeSelect" class="mono">
+            <option value="dark" selected>通常（暗色）</option>
+            <option value="transparent">透過</option>
+            <option value="blue">ブルーバック</option>
+            <option value="green">グリーンバック</option>
+          </select>
+        </div>
         <div id="log" class="mono"></div>
       </div>
     </aside>
@@ -375,6 +405,7 @@
     autoRotate: true,
     mode: 'procedural', // 'procedural' (built-in hologram figure) | 'rigged' (loaded GLB/VRM skeleton)
     modelSkeletonOnly: false, // when true (and mode==='rigged'): hide the loaded mesh, show only its bone rig
+    bgMode: 'dark', // 'dark' | 'transparent' | 'blue' | 'green'
     smooth: {},
     fps: { frames: 0, last: performance.now(), value: 0 },
   };
@@ -382,6 +413,12 @@
   $('mirrorToggle').addEventListener('change', e => state.mirror = e.target.checked);
   $('skeletonToggle').addEventListener('change', e => state.showSkeleton = e.target.checked);
   $('autoRotateToggle').addEventListener('change', e => state.autoRotate = e.target.checked);
+  $('bgModeSelect').addEventListener('change', e => {
+    state.bgMode = e.target.value;
+    applyBackgroundMode();
+    const label = { dark: '通常（暗色）', transparent: '透過', blue: 'ブルーバック', green: 'グリーンバック' }[state.bgMode];
+    log(`背景を「${label}」に変更しました`);
+  });
   $('skeletonOnlyToggle').addEventListener('change', e => {
     state.modelSkeletonOnly = e.target.checked;
     applyModelDisplayMode();
@@ -392,8 +429,13 @@
   // THREE.JS SCENE — low-poly "hologram figure" reconstructed from pose data
   // ---------------------------------------------------------------------
   const ACCENT = 0x39ff9d;
+  const CHROMA_GREEN = 0x00b140; // standard chroma-key green
+  const CHROMA_BLUE = 0x0047bb; // standard chroma-key blue — safer here than
+                                // green, since the avatar's own accent glow
+                                // is green and would key out along with it
   const LIMB_COLOR = 0x24344a;
   let scene, camera, renderer, avatarRoot, viewportEl;
+  let gridHelper = null, floorMesh = null;
   const segMeshes = {};
   const jointMeshes = {};
   let headMesh;
@@ -543,6 +585,44 @@
     }, { passive: false });
   }
 
+  // Switches how the scene backdrop is rendered:
+  //  - 'dark'        : normal dim背景 + floor/grid (default look)
+  //  - 'transparent' : canvas cleared to alpha 0, floor/grid/fog removed so
+  //                    only the avatar is drawn — suitable for capturing or
+  //                    compositing the figure over other content
+  //  - 'blue'        : flat chroma-key blue (recommended over green here,
+  //                    since the avatar's green glow would key out too)
+  //  - 'green'       : flat chroma-key green, floor/grid/fog removed so
+  //                    nothing but the avatar sits on the keyable color
+  function applyBackgroundMode(){
+    if (!renderer || !scene) return;
+    const mode = state.bgMode;
+    const plain = (mode === 'transparent' || mode === 'green' || mode === 'blue');
+
+    if (mode === 'transparent'){
+      scene.background = null;
+      renderer.setClearColor(0x000000, 0);
+    } else if (mode === 'green'){
+      scene.background = new THREE.Color(CHROMA_GREEN);
+      renderer.setClearColor(CHROMA_GREEN, 1);
+    } else if (mode === 'blue'){
+      scene.background = new THREE.Color(CHROMA_BLUE);
+      renderer.setClearColor(CHROMA_BLUE, 1);
+    } else {
+      scene.background = new THREE.Color(0x0a0c11);
+      renderer.setClearColor(0x0a0c11, 1);
+    }
+
+    // Fog tints the subject toward the background color, which would
+    // contaminate both the alpha edges and the chroma-key green.
+    scene.fog = plain ? null : new THREE.Fog(0x0a0c11, 3, 9);
+    if (gridHelper) gridHelper.visible = !plain;
+    if (floorMesh) floorMesh.visible = !plain;
+
+    const wrap = $('viewport-wrap');
+    if (wrap) wrap.classList.toggle('bg-transparent', mode === 'transparent');
+  }
+
   function initThree(){
     viewportEl = $('viewport');
     scene = new THREE.Scene();
@@ -552,7 +632,9 @@
     camera = new THREE.PerspectiveCamera(42, viewportEl.clientWidth / viewportEl.clientHeight, 0.1, 100);
     updateCameraPos();
 
-    renderer = new THREE.WebGLRenderer({ antialias: true });
+    // alpha:true is required so the canvas can be cleared to a fully
+    // transparent color in "transparent" background mode.
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(viewportEl.clientWidth, viewportEl.clientHeight);
     viewportEl.appendChild(renderer.domElement);
@@ -569,15 +651,17 @@
     rim.position.set(-3, 1.5, -2.5);
     scene.add(rim);
 
-    const grid = new THREE.GridHelper(6, 24, 0x1e2430, 0x14181f);
-    scene.add(grid);
-    const floor = new THREE.Mesh(
+    gridHelper = new THREE.GridHelper(6, 24, 0x1e2430, 0x14181f);
+    scene.add(gridHelper);
+    floorMesh = new THREE.Mesh(
       new THREE.CircleGeometry(3, 6),
       new THREE.MeshStandardMaterial({ color: 0x0e131a, roughness: 1, metalness: 0, flatShading: true })
     );
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = -0.002;
-    scene.add(floor);
+    floorMesh.rotation.x = -Math.PI / 2;
+    floorMesh.position.y = -0.002;
+    scene.add(floorMesh);
+
+    applyBackgroundMode();
 
     buildAvatar();
     setupCameraControls(renderer.domElement);
