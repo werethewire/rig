@@ -308,8 +308,11 @@
         <div id="modelStatus">未読み込み（プロシージャル表示中）</div>
         <div id="boneChecklist" class="bone-checklist mono"></div>
         <div class="btn-row">
-          <button class="btn half" id="revertBtn" disabled>プロシージャルに戻す</button>
+          <button class="btn half" id="flipBtn" disabled>向きを180°回転</button>
           <button class="btn half" id="removeModelBtn" disabled>モデルを外す</button>
+        </div>
+        <div class="btn-row">
+          <button class="btn half" id="revertBtn" disabled>プロシージャルに戻す</button>
         </div>
         <div class="toggle-row">
           <span>モデルを隠してリグのみ表示</span>
@@ -700,7 +703,7 @@
   // ---------------------------------------------------------------------
   const DRIVEN_BONES = ['torso','neck','leftUpperArm','leftLowerArm','rightUpperArm','rightLowerArm','leftUpperLeg','leftLowerLeg','rightUpperLeg','rightLowerLeg'];
   const BONE_LABELS = {
-    torso:'胴体（胸）', neck:'首', leftUpperArm:'左上腕', leftLowerArm:'左前腕',
+    torso:'胴体（腰→胸）', neck:'首（胸→頭）', leftUpperArm:'左上腕', leftLowerArm:'左前腕',
     rightUpperArm:'右上腕', rightLowerArm:'右前腕', leftUpperLeg:'左太もも',
     leftLowerLeg:'左すね', rightUpperLeg:'右太もも', rightLowerLeg:'右すね',
   };
@@ -735,6 +738,33 @@
     return bones.find(b => include.some(p => normName(b.name).includes(p)) && !exclude.some(p => normName(b.name).includes(p))) || null;
   }
   function firstBoneChild(b){ return (b && b.children.find(c => c.isBone)) || null; }
+  function worldPos(o){ const v = new THREE.Vector3(); o.getWorldPosition(v); return v; }
+
+  // Nearest common bone ancestor — used to locate the chest as "whatever both
+  // arms hang from", which is far more reliable across rigs than name matching
+  // (works whether or not the rig has shoulder/clavicle or multiple spine bones).
+  function commonBoneAncestor(a, b){
+    if (!a || !b) return null;
+    const chain = [];
+    for (let n = a.parent; n; n = n.parent) if (n.isBone) chain.push(n);
+    for (let n = b.parent; n; n = n.parent) if (n.isBone && chain.indexOf(n) !== -1) return n;
+    return null;
+  }
+
+  // Some rigs place a bone at exactly the same position as its parent (a
+  // zero-length segment), which yields no usable direction. Walk further down
+  // the chain until we find a descendant that is actually offset from the bone.
+  function nonDegenerateTargetPos(bone, child){
+    if (!bone) return null;
+    const bp = worldPos(bone);
+    let c = child, guard = 0;
+    while (c && guard++ < 8){
+      const cp = worldPos(c);
+      if (cp.distanceToSquared(bp) > 1e-8) return cp;
+      c = firstBoneChild(c);
+    }
+    return null;
+  }
 
   function detectHumanoidBones(root){
     const bones = [];
@@ -742,54 +772,73 @@
 
     const headB = findBoneCenter(bones, ['head']);
     const neckB = findBoneCenter(bones, ['neck']);
-    const hipsB = findBoneCenter(bones, ['hips', 'pelvis']) || findBoneCenter(bones, ['hip']);
 
     const lHand = findBoneBySide(bones, 'left', ['hand']);
     const rHand = findBoneBySide(bones, 'right', ['hand']);
     const lLowerArm = findBoneBySide(bones, 'left', ['forearm', 'lowerarm']);
     const rLowerArm = findBoneBySide(bones, 'right', ['forearm', 'lowerarm']);
-    const lUpperArm = findBoneBySide(bones, 'left', ['upperarm', 'arm'], ['forearm', 'lowerarm']);
-    const rUpperArm = findBoneBySide(bones, 'right', ['upperarm', 'arm'], ['forearm', 'lowerarm']);
+    const lUpperArm = findBoneBySide(bones, 'left', ['upperarm', 'arm'], ['forearm', 'lowerarm', 'hand']);
+    const rUpperArm = findBoneBySide(bones, 'right', ['upperarm', 'arm'], ['forearm', 'lowerarm', 'hand']);
 
     const lFoot = findBoneBySide(bones, 'left', ['foot']);
     const rFoot = findBoneBySide(bones, 'right', ['foot']);
-    const lLowerLeg = findBoneBySide(bones, 'left', ['lowerleg', 'shin', 'calf']) || findBoneBySide(bones, 'left', ['leg'], ['upleg', 'upperleg', 'thigh']);
-    const rLowerLeg = findBoneBySide(bones, 'right', ['lowerleg', 'shin', 'calf']) || findBoneBySide(bones, 'right', ['leg'], ['upleg', 'upperleg', 'thigh']);
+    const lLowerLeg = findBoneBySide(bones, 'left', ['lowerleg', 'shin', 'calf']) || findBoneBySide(bones, 'left', ['leg'], ['upleg', 'upperleg', 'thigh', 'foot']);
+    const rLowerLeg = findBoneBySide(bones, 'right', ['lowerleg', 'shin', 'calf']) || findBoneBySide(bones, 'right', ['leg'], ['upleg', 'upperleg', 'thigh', 'foot']);
     const lUpperLeg = findBoneBySide(bones, 'left', ['upperleg', 'upleg', 'thigh']);
     const rUpperLeg = findBoneBySide(bones, 'right', ['upperleg', 'upleg', 'thigh']);
 
-    const torsoBone = (neckB && neckB.parent && neckB.parent.isBone) ? neckB.parent
-                     : (headB && headB.parent && headB.parent.isBone) ? headB.parent : null;
+    // --- spine anchoring ---
+    // chest = the bone both arms descend from; hips = named hips/pelvis, else
+    // the bone both legs descend from, else the topmost bone in the hierarchy.
+    let chestB = commonBoneAncestor(lUpperArm, rUpperArm);
+    let hipsB = findBoneCenter(bones, ['hips', 'pelvis']) || commonBoneAncestor(lUpperLeg, rUpperLeg) || findBoneCenter(bones, ['hip']);
+    if (!hipsB && bones.length) hipsB = bones.reduce((a, b) => (a && a.parent && a.parent.isBone) ? b : a, bones[0]);
+    if (!chestB) chestB = neckB || headB || hipsB;
+
+    // Drive the chest→head span with whichever bone actually spans it: a real
+    // neck bone if the rig has one, otherwise the chest bone itself.
+    let neckDrive = neckB || chestB;
+    if (neckDrive === hipsB) neckDrive = null; // would collide with the torso segment
 
     const map = {
-      torso: torsoBone, neck: neckB,
+      torso: hipsB, neck: neckDrive,
       leftUpperArm: lUpperArm, leftLowerArm: lLowerArm,
       rightUpperArm: rUpperArm, rightLowerArm: rLowerArm,
       leftUpperLeg: lUpperLeg, leftLowerLeg: lLowerLeg,
       rightUpperLeg: rUpperLeg, rightLowerLeg: rLowerLeg,
     };
-    const targetChild = {
-      torso: neckB || firstBoneChild(torsoBone),
-      neck: headB || firstBoneChild(neckB),
-      leftUpperArm: lLowerArm || firstBoneChild(lUpperArm),
-      leftLowerArm: lHand || firstBoneChild(lLowerArm),
-      rightUpperArm: rLowerArm || firstBoneChild(rUpperArm),
-      rightLowerArm: rHand || firstBoneChild(rLowerArm),
-      leftUpperLeg: lLowerLeg || firstBoneChild(lUpperLeg),
-      leftLowerLeg: lFoot || firstBoneChild(lLowerLeg),
-      rightUpperLeg: rLowerLeg || firstBoneChild(rUpperLeg),
-      rightLowerLeg: rFoot || firstBoneChild(rLowerLeg),
+
+    // Rest-direction targets, as world positions captured in the bind pose.
+    // Torso prefers the true shoulder midpoint (the anatomical counterpart of
+    // MediaPipe's midHip→midSh vector) over any single spine child bone.
+    let torsoTarget = null;
+    if (lUpperArm && rUpperArm){
+      torsoTarget = worldPos(lUpperArm).add(worldPos(rUpperArm)).multiplyScalar(0.5);
+      if (hipsB && torsoTarget.distanceToSquared(worldPos(hipsB)) < 1e-8) torsoTarget = null;
+    }
+    if (!torsoTarget) torsoTarget = nonDegenerateTargetPos(hipsB, chestB !== hipsB ? chestB : firstBoneChild(hipsB));
+    if (!torsoTarget) torsoTarget = nonDegenerateTargetPos(hipsB, headB);
+
+    const targetPos = {
+      torso: torsoTarget,
+      neck: nonDegenerateTargetPos(neckDrive, headB || firstBoneChild(neckDrive)),
+      leftUpperArm: nonDegenerateTargetPos(lUpperArm, lLowerArm || firstBoneChild(lUpperArm)),
+      leftLowerArm: nonDegenerateTargetPos(lLowerArm, lHand || firstBoneChild(lLowerArm)),
+      rightUpperArm: nonDegenerateTargetPos(rUpperArm, rLowerArm || firstBoneChild(rUpperArm)),
+      rightLowerArm: nonDegenerateTargetPos(rLowerArm, rHand || firstBoneChild(rLowerArm)),
+      leftUpperLeg: nonDegenerateTargetPos(lUpperLeg, lLowerLeg || firstBoneChild(lUpperLeg)),
+      leftLowerLeg: nonDegenerateTargetPos(lLowerLeg, lFoot || firstBoneChild(lLowerLeg)),
+      rightUpperLeg: nonDegenerateTargetPos(rUpperLeg, rLowerLeg || firstBoneChild(rUpperLeg)),
+      rightLowerLeg: nonDegenerateTargetPos(rLowerLeg, rFoot || firstBoneChild(rLowerLeg)),
     };
-    return { map, targetChild, hipsB, headB, boneCount: bones.length };
+    return { map, targetPos, hipsB, chestB, headB, neckB, boneCount: bones.length };
   }
 
-  function computeRestDir(bone, child){
-    if (!bone || !child || !bone.parent) return null;
-    const boneWP = new THREE.Vector3(); bone.getWorldPosition(boneWP);
-    const childWP = new THREE.Vector3(); child.getWorldPosition(childWP);
-    const parentWQ = new THREE.Quaternion(); bone.parent.getWorldQuaternion(parentWQ);
-    const dir = childWP.sub(boneWP);
+  function computeRestDir(bone, targetWorldPos){
+    if (!bone || !targetWorldPos || !bone.parent) return null;
+    const dir = targetWorldPos.clone().sub(worldPos(bone));
     if (dir.lengthSq() < 1e-10) return null;
+    const parentWQ = new THREE.Quaternion(); bone.parent.getWorldQuaternion(parentWQ);
     dir.applyQuaternion(parentWQ.invert());
     return dir.normalize();
   }
@@ -857,10 +906,13 @@
     const el = $('boneChecklist');
     el.innerHTML = '';
     DRIVEN_BONES.forEach(name => {
-      const ok = !!(riggedBones && riggedBones.map[name] && riggedRestDirs[name]);
+      const bone = riggedBones && riggedBones.map[name];
+      const ok = !!(bone && riggedRestDirs[name]);
       const row = document.createElement('div');
       row.className = 'row';
-      row.innerHTML = `<span>${BONE_LABELS[name]}</span><span class="${ok ? 'ok' : 'bad'}">${ok ? '✓ 検出' : '— 未検出'}</span>`;
+      const right = ok ? bone.name : (bone ? '長さ0' : '未検出');
+      row.title = ok ? `${BONE_LABELS[name]} → ボーン「${bone.name}」` : `${BONE_LABELS[name]} は割り当てできませんでした`;
+      row.innerHTML = `<span>${BONE_LABELS[name]}</span><span class="${ok ? 'ok' : 'bad'}">${ok ? '✓ ' : '— '}${right}</span>`;
       el.appendChild(row);
     });
   }
@@ -901,7 +953,7 @@
           riggedBones = detection;
           riggedRestDirs = {};
           DRIVEN_BONES.forEach(name => {
-            riggedRestDirs[name] = computeRestDir(detection.map[name], detection.targetChild[name]);
+            riggedRestDirs[name] = computeRestDir(detection.map[name], detection.targetPos[name]);
           });
           const foundCount = DRIVEN_BONES.filter(n => detection.map[n] && riggedRestDirs[n]).length;
           updateBoneChecklist();
@@ -921,6 +973,7 @@
           log(`3Dモデルを読み込みました: ${file.name}（${foundCount}/${DRIVEN_BONES.length}部位を自動検出）`);
           setRevertButtonLabel();
           $('removeModelBtn').disabled = false;
+          $('flipBtn').disabled = false;
           $('modelFile').disabled = false;
 
           if (foundCount < 4){
@@ -1001,6 +1054,13 @@
     toggle.checked = state.modelSkeletonOnly;
   }
 
+  function flipModelFacing(){
+    if (!riggedRoot) return;
+    riggedRoot.rotation.y += Math.PI;
+    riggedRoot.updateMatrixWorld(true);
+    log('モデルの向きを180°回転しました');
+  }
+
   function setRevertButtonLabel(){
     const btn = $('revertBtn');
     if (!riggedRoot){ btn.textContent = 'プロシージャルに戻す'; btn.disabled = true; return; }
@@ -1037,6 +1097,7 @@
     $('modelStatus').textContent = '未読み込み（プロシージャル表示中）';
     $('boneChecklist').innerHTML = '';
     $('removeModelBtn').disabled = true;
+    $('flipBtn').disabled = true;
     setRevertButtonLabel();
     applyModelDisplayMode();
     log('モデルを外しました');
@@ -1227,6 +1288,7 @@
     });
     $('revertBtn').addEventListener('click', toggleAvatarMode);
     $('removeModelBtn').addEventListener('click', removeModel);
+    $('flipBtn').addEventListener('click', flipModelFacing);
 
     if (isFileProtocol()){
       showFileProtocolNotice();
