@@ -313,7 +313,9 @@
         </div>
         <div class="btn-row">
           <button class="btn half" id="revertBtn" disabled>プロシージャルに戻す</button>
+          <button class="btn half" id="recalibHeadBtn" disabled>頭の向きを基準化</button>
         </div>
+        <div class="model-hint">「頭の向きを基準化」：カメラを正面から見て頭をまっすぐにした状態で押すと、その姿勢が頭の水平・正面になります（トラッキング開始時に自動取得）。</div>
         <div class="toggle-row">
           <span>モデルを隠してリグのみ表示</span>
           <label class="switch"><input type="checkbox" id="skeletonOnlyToggle" disabled><span class="slider"></span></label>
@@ -413,7 +415,12 @@
     fps: { frames: 0, last: performance.now(), value: 0 },
   };
 
-  $('mirrorToggle').addEventListener('change', e => state.mirror = e.target.checked);
+  $('mirrorToggle').addEventListener('change', e => {
+    state.mirror = e.target.checked;
+    // Mirroring reflects the landmarks, so the stored neutral head frame no
+    // longer describes the same handedness — it has to be retaken.
+    resetHeadCalibration();
+  });
   $('skeletonToggle').addEventListener('change', e => state.showSkeleton = e.target.checked);
   $('autoRotateToggle').addEventListener('change', e => state.autoRotate = e.target.checked);
   $('bgModeSelect').addEventListener('change', e => {
@@ -530,10 +537,12 @@
       lkn:[0.11,0.50,0.02], rkn:[-0.11,0.50,0.02],
       lan:[0.11,0.06,0], ran:[-0.11,0.06,0],
       nose:[0,1.60,0.06],
+      lear:[0.055,1.60,-0.02], rear:[-0.055,1.60,-0.02],
     };
     const V = {}; for (const k in P) V[k] = new THREE.Vector3(...P[k]);
     V.midSh = new THREE.Vector3().addVectors(V.lsh, V.rsh).multiplyScalar(0.5);
     V.midHip = new THREE.Vector3().addVectors(V.lhip, V.rhip).multiplyScalar(0.5);
+    V.midEar = new THREE.Vector3().addVectors(V.lear, V.rear).multiplyScalar(0.5);
     return V;
   }
   function applyDefaultPose(){
@@ -708,7 +717,7 @@
     leftLowerLeg:'左すね', rightUpperLeg:'右太もも', rightLowerLeg:'右すね',
   };
 
-  let riggedRoot = null, riggedBones = null, riggedRestDirs = null, gltfLoader = null;
+  let riggedRoot = null, riggedBones = null, riggedRestDirs = null, riggedRestQuats = null, riggedHead = null, gltfLoader = null;
   // "リグのみ表示" 用: 読み込んだモデルの実メッシュ一覧、骨格ライン表示、関節マーカー
   let riggedMeshes = [], riggedSkeletonHelper = null, riggedJointMarkers = null;
   const _jointWP = new THREE.Vector3();
@@ -795,9 +804,12 @@
     if (!hipsB && bones.length) hipsB = bones.reduce((a, b) => (a && a.parent && a.parent.isBone) ? b : a, bones[0]);
     if (!chestB) chestB = neckB || headB || hipsB;
 
-    // Drive the chest→head span with whichever bone actually spans it: a real
-    // neck bone if the rig has one, otherwise the chest bone itself.
-    let neckDrive = neckB || chestB;
+    // The chest→head span is driven only by a real neck bone. Falling back to
+    // the chest bone (which both arms hang from) would swing the shoulders
+    // every time the head moves, and falling back to the head bone would fight
+    // with the head orientation solve below. Rigs with no neck bone simply
+    // leave this segment unassigned — the head is still driven, by orientation.
+    let neckDrive = neckB;
     if (neckDrive === hipsB) neckDrive = null; // would collide with the torso segment
 
     const map = {
@@ -834,8 +846,16 @@
     return { map, targetPos, hipsB, chestB, headB, neckB, boneCount: bones.length };
   }
 
-  function computeRestDir(bone, targetWorldPos){
-    if (!bone || !targetWorldPos || !bone.parent) return null;
+  // Rest direction of `bone`, in PARENT space (so it includes the bone's own
+  // bind-pose rotation — see setBoneSwing).
+  // axisFallback is for a leaf bone that has no child to aim at: Blender,
+  // Mixamo and VRM all export bones whose local +Y is the bone's own axis, so
+  // that is the best available guess. Only used where the caller opts in.
+  function computeRestDir(bone, targetWorldPos, axisFallback){
+    if (!bone || !bone.parent) return null;
+    if (!targetWorldPos){
+      return axisFallback ? new THREE.Vector3(0, 1, 0).applyQuaternion(bone.quaternion).normalize() : null;
+    }
     const dir = targetWorldPos.clone().sub(worldPos(bone));
     if (dir.lengthSq() < 1e-10) return null;
     const parentWQ = new THREE.Quaternion(); bone.parent.getWorldQuaternion(parentWQ);
@@ -843,20 +863,130 @@
     return dir.normalize();
   }
 
-  function setBoneSwing(bone, restDir, worldDir){
+  // Rotates `bone` so that it points along `worldDir`.
+  //
+  // restDir is where the bone points in the bind pose, expressed in PARENT
+  // space — i.e. it already contains the bone's own bind-pose rotation
+  // (restQuat). So the swing rotation computed here is a correction applied
+  // ON TOP of the bind pose, and restQuat has to be composed back in:
+  //   final = swing * restQuat
+  // Overwriting bone.quaternion with the bare swing instead would silently
+  // throw the bind pose away. That is harmless only for rigs whose bones have
+  // an identity local rotation; on a Blender-exported rig (where a bone's
+  // local +Y is its own axis, so arms/legs carry 90°–170° bind rotations) it
+  // sends the limb off at roughly a right angle to where it should be.
+  function setBoneSwing(bone, restDir, restQuat, worldDir){
     if (!bone || !restDir || worldDir.lengthSq() < 1e-10) return;
     const parentWQ = new THREE.Quaternion();
     bone.parent.getWorldQuaternion(parentWQ);
     const localTarget = worldDir.clone().normalize().applyQuaternion(parentWQ.invert()).normalize();
     bone.quaternion.setFromUnitVectors(restDir, localTarget);
+    if (restQuat) bone.quaternion.multiply(restQuat);
     bone.updateMatrixWorld(true);
+  }
+
+  // --- HEAD ORIENTATION ---------------------------------------------------
+  // The head can't be driven the way the limbs are. A limb only needs a
+  // direction, but "where the head points" is a full orientation, and the only
+  // head landmark that reads as a direction is the nose — which sits in FRONT
+  // of the neck, not above it. Aiming the head bone's axis at the nose
+  // therefore tips the head forward by the nose's own offset, every frame,
+  // whatever the person actually does.
+  //
+  // So we solve the head's orientation instead of its direction, from a frame
+  // built out of the head's own landmarks:
+  //   right = ear → ear      (rock-solid, and it turns with the head)
+  //   fwd   = ear-mid → nose (where the face looks)
+  //   up    = fwd × right    (perpendicular to both)
+  //
+  // That frame still can't be compared against the model directly: "up" here is
+  // perpendicular to the NOSE direction, and the nose sits below the ear line
+  // by an amount that is a property of the face, not of the pose. Measured
+  // against the rig's own head axis it leaves a fixed ~17° pitch bias — the
+  // same permanent lean, just smaller.
+  //
+  // So the frame is compared against ITSELF instead: one frame is captured as
+  // the neutral reference while the person is facing the camera with their head
+  // level, and every later frame is applied as the rotation away from that
+  // reference. Whatever the face's proportions are, they are present in both
+  // frames and cancel exactly — a neutral head lands precisely on the bind
+  // pose, i.e. no tilt at all.
+  const _basisM = new THREE.Matrix4();
+  function basisQuaternion(rightRaw, upRaw){
+    const up = upRaw.clone();
+    if (up.lengthSq() < 1e-10) return null;
+    up.normalize();
+    const right = rightRaw.clone();
+    right.sub(up.clone().multiplyScalar(right.dot(up))); // orthogonalize against up
+    if (right.lengthSq() < 1e-8) return null;            // ears collapsed onto the head axis
+    right.normalize();
+    const fwd = new THREE.Vector3().crossVectors(right, up);
+    _basisM.makeBasis(right, up, fwd);
+    return new THREE.Quaternion().setFromRotationMatrix(_basisM);
+  }
+
+  function headBasisFromPoints(P, mirrored){
+    if (!P.lear || !P.rear || !P.midEar) return null;
+    const right = new THREE.Vector3().subVectors(P.lear, P.rear);
+    const fwd = new THREE.Vector3().subVectors(P.nose, P.midEar);
+    const up = new THREE.Vector3().crossVectors(fwd, right);
+    // Mirror mode reflects every landmark across X. A reflection is not a
+    // rotation, so the frame comes out left-handed and this cross product
+    // points at the floor; flip it back.
+    if (mirrored) up.negate();
+    return basisQuaternion(right, up);
+  }
+
+  // Captured at load, with the model in its bind pose. Stored relative to
+  // riggedRoot's own rotation so that the「向きを180°回転」button (which rotates
+  // riggedRoot) doesn't invalidate it.
+  function buildHeadOrientationRig(detection){
+    const bone = detection.headB;
+    if (!bone || !bone.parent) return null;
+    const rootQ = new THREE.Quaternion(); riggedRoot.getWorldQuaternion(rootQ);
+    const bindQ = new THREE.Quaternion(); bone.getWorldQuaternion(bindQ);
+    return { bone, bindQLocal: rootQ.invert().multiply(bindQ) };
+  }
+
+  // The neutral reference frame. Null until calibrated; while it is null the
+  // head simply stays in its bind pose, which already looks correct.
+  let headNeutralQ = null;
+  function resetHeadCalibration(reason){
+    headNeutralQ = null;
+    if (reason) log(reason);
+  }
+
+  const _hqRoot = new THREE.Quaternion(), _hqParent = new THREE.Quaternion();
+  // headConfidence: MediaPipe's visibility for the nose/ear landmarks. The
+  // neutral frame is only taken from a confidently-seen head, so a half-
+  // detected first frame can't poison the reference for the whole session.
+  function applyHeadOrientation(P, mirrored, headConfidence){
+    if (!riggedHead) return;
+    const targetQ = headBasisFromPoints(P, mirrored);
+    if (!targetQ) return; // degenerate landmarks — leave the head where it was
+
+    if (!headNeutralQ){
+      if (headConfidence < 0.8) return;
+      headNeutralQ = targetQ.clone();
+      log('頭の向きの基準を取得しました（今の姿勢が「正面・水平」になります）');
+    }
+
+    riggedRoot.getWorldQuaternion(_hqRoot);
+    const bindQ = _hqRoot.multiply(riggedHead.bindQLocal);
+
+    // delta = how far the head has rotated away from the neutral reference
+    const worldTarget = targetQ.multiply(headNeutralQ.clone().invert()).multiply(bindQ);
+    riggedHead.bone.parent.getWorldQuaternion(_hqParent);
+    riggedHead.bone.quaternion.copy(_hqParent.invert().multiply(worldTarget));
+    riggedHead.bone.updateMatrixWorld(true);
   }
 
   function applyPointsToRiggedModel(P){
     if (!riggedBones) return;
     const dirs = {
       torso: new THREE.Vector3().subVectors(P.midSh, P.midHip),
-      neck: new THREE.Vector3().subVectors(P.nose, P.midSh),
+      // Aim the neck at the head's pivot (between the ears), not at the nose.
+      neck: new THREE.Vector3().subVectors(P.midEar, P.midSh),
       leftUpperArm: new THREE.Vector3().subVectors(P.lel, P.lsh),
       leftLowerArm: new THREE.Vector3().subVectors(P.lwr, P.lel),
       rightUpperArm: new THREE.Vector3().subVectors(P.rel, P.rsh),
@@ -871,7 +1001,7 @@
     DRIVEN_BONES.forEach(name => {
       const bone = riggedBones.map[name];
       const restDir = riggedRestDirs[name];
-      if (bone && restDir) setBoneSwing(bone, restDir, dirs[name]);
+      if (bone && restDir) setBoneSwing(bone, restDir, riggedRestQuats[name], dirs[name]);
     });
   }
 
@@ -915,6 +1045,17 @@
       row.innerHTML = `<span>${BONE_LABELS[name]}</span><span class="${ok ? 'ok' : 'bad'}">${ok ? '✓ ' : '— '}${right}</span>`;
       el.appendChild(row);
     });
+
+    // The head isn't swing-driven like the others — it gets a full orientation
+    // from the ear/nose frame — so it's listed separately.
+    const headRow = document.createElement('div');
+    headRow.className = 'row';
+    const headOk = !!riggedHead;
+    headRow.title = headOk
+      ? `頭（向き）→ ボーン「${riggedHead.bone.name}」`
+      : '頭（向き）は割り当てできませんでした';
+    headRow.innerHTML = `<span>頭（向き）</span><span class="${headOk ? 'ok' : 'bad'}">${headOk ? '✓ ' + riggedHead.bone.name : '— 未検出'}</span>`;
+    el.appendChild(headRow);
   }
 
   function loadModelFile(file){
@@ -952,11 +1093,23 @@
           const detection = detectHumanoidBones(riggedRoot);
           riggedBones = detection;
           riggedRestDirs = {};
+          riggedRestQuats = {};
+          // Must run before any pose is applied — once applyPointsToRiggedModel
+          // writes to bone.quaternion the bind pose is no longer readable.
           DRIVEN_BONES.forEach(name => {
-            riggedRestDirs[name] = computeRestDir(detection.map[name], detection.targetPos[name]);
+            const bone = detection.map[name];
+            // The neck slot may resolve to a childless head bone (rigs with no
+            // neck bone), which has no target to aim at — allow the axis guess.
+            riggedRestDirs[name] = computeRestDir(bone, detection.targetPos[name], name === 'neck');
+            riggedRestQuats[name] = bone ? bone.quaternion.clone() : null;
           });
-          const foundCount = DRIVEN_BONES.filter(n => detection.map[n] && riggedRestDirs[n]).length;
+          riggedHead = buildHeadOrientationRig(detection);
+          resetHeadCalibration();
+          const foundCount = DRIVEN_BONES.filter(n => detection.map[n] && riggedRestDirs[n]).length + (riggedHead ? 1 : 0);
           updateBoneChecklist();
+          // Limbs only. The default pose is a rig-space placeholder rather than
+          // tracked data, and its facing need not match the model's, so the
+          // head is left in its bind pose — which is neutral by definition.
           applyPointsToRiggedModel(getDefaultPoints());
 
           riggedMeshes = [];
@@ -969,11 +1122,12 @@
           riggedRoot.visible = true;
           applyModelDisplayMode();
 
-          statusEl.textContent = `読み込み完了：${file.name}（全${bones.length}ボーン中 ${foundCount}/${DRIVEN_BONES.length}部位を自動検出）`;
-          log(`3Dモデルを読み込みました: ${file.name}（${foundCount}/${DRIVEN_BONES.length}部位を自動検出）`);
+          statusEl.textContent = `読み込み完了：${file.name}（全${bones.length}ボーン中 ${foundCount}/${DRIVEN_BONES.length + 1}部位を自動検出）`;
+          log(`3Dモデルを読み込みました: ${file.name}（${foundCount}/${DRIVEN_BONES.length + 1}部位を自動検出）`);
           setRevertButtonLabel();
           $('removeModelBtn').disabled = false;
           $('flipBtn').disabled = false;
+          $('recalibHeadBtn').disabled = !riggedHead;
           $('modelFile').disabled = false;
 
           if (foundCount < 4){
@@ -1090,7 +1244,8 @@
     if (riggedSkeletonHelper){ scene.remove(riggedSkeletonHelper); riggedSkeletonHelper.geometry.dispose(); riggedSkeletonHelper.material.dispose(); riggedSkeletonHelper = null; }
     if (riggedJointMarkers){ scene.remove(riggedJointMarkers); disposeObject3D(riggedJointMarkers); riggedJointMarkers = null; }
     riggedMeshes = [];
-    riggedBones = null; riggedRestDirs = null;
+    riggedBones = null; riggedRestDirs = null; riggedRestQuats = null; riggedHead = null;
+    resetHeadCalibration();
     state.mode = 'procedural';
     state.modelSkeletonOnly = false;
     avatarRoot.visible = true;
@@ -1098,6 +1253,7 @@
     $('boneChecklist').innerHTML = '';
     $('removeModelBtn').disabled = true;
     $('flipBtn').disabled = true;
+    $('recalibHeadBtn').disabled = true;
     setRevertButtonLabel();
     applyModelDisplayMode();
     log('モデルを外しました');
@@ -1106,7 +1262,8 @@
   // ---------------------------------------------------------------------
   // MEDIAPIPE POSE — webcam capture + landmark detection
   // ---------------------------------------------------------------------
-  const IDX = { nose:0, lsh:11, rsh:12, lel:13, rel:14, lwr:15, rwr:16, lhip:23, rhip:24, lkn:25, rkn:26, lan:27, ran:28 };
+  // lear/rear (7/8) are used only to build the head's orientation frame.
+  const IDX = { nose:0, lear:7, rear:8, lsh:11, rsh:12, lel:13, rel:14, lwr:15, rwr:16, lhip:23, rhip:24, lkn:25, rkn:26, lan:27, ran:28 };
   const CONNECTIONS = [[11,13],[13,15],[12,14],[14,16],[11,12],[23,24],[11,23],[12,24],[23,25],[25,27],[24,26],[26,28],[0,11],[0,12]];
 
   const SCALE = 1.0;
@@ -1192,9 +1349,16 @@
     for (const k in IDX) P[k] = smoothPoint(k, toWorld(lm[IDX[k]]));
     P.midSh = new THREE.Vector3().addVectors(P.lsh, P.rsh).multiplyScalar(0.5);
     P.midHip = new THREE.Vector3().addVectors(P.lhip, P.rhip).multiplyScalar(0.5);
+    P.midEar = new THREE.Vector3().addVectors(P.lear, P.rear).multiplyScalar(0.5);
 
     if (state.mode === 'rigged' && riggedBones){
       applyPointsToRiggedModel(P);
+      const headConf = Math.min(
+        vis[IDX.nose] ? (vis[IDX.nose].visibility ?? 1) : 0,
+        vis[IDX.lear] ? (vis[IDX.lear].visibility ?? 1) : 0,
+        vis[IDX.rear] ? (vis[IDX.rear].visibility ?? 1) : 0
+      );
+      applyHeadOrientation(P, state.mirror, headConf); // after the limbs — the head rides on them
     } else {
       applyPointsToRig(P);
     }
@@ -1240,6 +1404,7 @@
       video.srcObject = stream;
       await video.play();
       state.running = true;
+      resetHeadCalibration(); // the neutral head frame is retaken for each session
       log('カメラを起動しました。トラッキングを開始します');
       btn.textContent = '■ トラッキング停止';
       btn.classList.remove('primary'); btn.classList.add('stop');
@@ -1289,6 +1454,9 @@
     $('revertBtn').addEventListener('click', toggleAvatarMode);
     $('removeModelBtn').addEventListener('click', removeModel);
     $('flipBtn').addEventListener('click', flipModelFacing);
+    $('recalibHeadBtn').addEventListener('click', () => {
+      resetHeadCalibration('頭の向きの基準を取り直します。カメラを正面から見て、頭をまっすぐにしてください');
+    });
 
     if (isFileProtocol()){
       showFileProtocolNotice();
