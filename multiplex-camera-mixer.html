@@ -385,8 +385,10 @@
       }
       return;
     }
-    const names = deviceCache.map(d => d.label || '(ラベル非公開のカメラ)').join(' / ');
-    deviceStatus.textContent = `検出済みカメラ: ${deviceCache.length}台 — ${names}`;
+    const real = deviceCache.filter(d => !looksVirtual(d.label));
+    const names = deviceCache.map(d => (d.label || '(ラベル非公開のカメラ)') + (looksVirtual(d.label) ? '（仮想）' : '')).join(' / ');
+    deviceStatus.textContent =
+      `検出済みカメラ: ${deviceCache.length}台（うち物理カメラ ${real.length}台） — ${names}`;
   }
 
   // カメラが使えない原因は「本当に無い」「権限が無い」「非セキュアなページ」「iframe内」など
@@ -448,7 +450,7 @@
       const sel = cam.el.querySelector('.dev-select');
       const current = cam.deviceId;
       const optionsHtml = deviceCache.map(d =>
-        `<option value="${d.deviceId}" ${d.deviceId===current?'selected':''}>${d.label || 'カメラ'}</option>`
+        `<option value="${d.deviceId}" ${d.deviceId===current?'selected':''}>${d.label || 'カメラ'}${looksVirtual(d.label) ? '（仮想）' : ''}</option>`
       ).join('');
       sel.innerHTML = optionsHtml || '<option value="">（カメラなし）</option>';
     });
@@ -488,8 +490,12 @@
       return;
     }
 
-    const usedIds = cams.map(c => c.deviceId);
-    const defaultDevice = devices.find(d => !usedIds.includes(d.deviceId)) || devices[0];
+    const usedIds = cams.map(c => c.deviceId).filter(Boolean);
+    let candidates = devices.filter(d => !usedIds.includes(d.deviceId));
+    if (!candidates.length) candidates = devices.slice();
+    // 実カメラを優先。仮想カメラしか残っていない場合でも一応試すが順番は最後にする。
+    candidates.sort((a, b) => (looksVirtual(a.label) ? 1 : 0) - (looksVirtual(b.label) ? 1 : 0));
+    const defaultDevice = candidates[0];
 
     const id = 'cam' + (++camCounter);
     const cam = {
@@ -538,14 +544,36 @@
     cam.previewCtx = cam.previewCanvas.getContext('2d');
     updateStageState();
 
-    const ok = await startStream(cam, defaultDevice.deviceId);
-    if (!ok){
+    // 1台失敗しただけで諦めず、候補を順に試す。ただし仮想カメラは1台落ちた時点で
+    // 送出元が動いていないと判断できるため、以降は試さない（1台ごとに約10秒待たされるだけ）。
+    const failures = [];
+    let ok = false, virtualFailed = false;
+    for (const d of candidates.slice(0, 4)){
+      if (looksVirtual(d.label) && virtualFailed) continue;
+      setChStatus(cam, `${d.label || 'カメラ'} を起動しています…`, 'busy');
+      ok = await startStream(cam, d.deviceId);
+      if (ok) break;
+      failures.push(`・${d.label || d.deviceId}\n　${describeStreamError(cam.lastError)}`);
+      if (looksVirtual(d.label)) virtualFailed = true;
+    }
+
+    if (ok){
+      const sel = cam.el.querySelector('.dev-select');
+      if (sel) sel.value = cam.deviceId;   // 別の候補で開いた場合に選択欄を実態へ合わせる
+      plateStatusIdle(cam);
+    } else {
       // 起動に失敗した CH を残すと、空きスロットを食い潰して「カメラを追加」が
       // 押せなくなる。失敗した CH は必ず片付ける。
-      const err = cam.lastError;
       removeCamera(cam.id);
-      alert('カメラの起動に失敗しました。\n\n' + describeStreamError(err) +
-            '\n\n解決したら「＋ カメラを追加」をもう一度押してください。');
+      const allVirtual = candidates.every(d => looksVirtual(d.label));
+      const msg = ['カメラの起動に失敗しました。', '', '試したカメラ:', ...failures];
+      if (allVirtual){
+        msg.push('', '■ 空いているカメラが仮想カメラ（NDI / OBS Virtual Camera / スマホ連携など）しかありません。');
+        msg.push('送出元のアプリが動作していないと起動できません。OBS なら「仮想カメラ開始」を押す、NDI なら送出元を立ち上げる必要があります。');
+        msg.push('物理カメラを増やしたい場合は、USBカメラをもう1台接続して「⟳ デバイス再検出」を押してください。');
+      }
+      msg.push('', '解決したら「＋ カメラを追加」をもう一度押してください。');
+      alert(msg.join('\n'));
     }
     addCamBtn.disabled = cams.length >= MAX_CAMS;
   }
@@ -556,7 +584,7 @@
     wrap.dataset.id = cam.id;
 
     const options = devices.map(d =>
-      `<option value="${d.deviceId}" ${d.deviceId===selectedDeviceId?'selected':''}>${d.label || 'カメラ'}</option>`
+      `<option value="${d.deviceId}" ${d.deviceId===selectedDeviceId?'selected':''}>${d.label || 'カメラ'}${looksVirtual(d.label) ? '（仮想）' : ''}</option>`
     ).join('');
 
     wrap.innerHTML = `
@@ -647,9 +675,14 @@
     NotFoundError: 'そのカメラが見つかりません。抜き差しされた可能性があります。「⟳ デバイス再検出」を押してください。',
     NotReadableError: 'カメラが他に掴まれています。Zoom・Teams・OBS等のほか、このページを開いた別のタブ／ウィンドウが残っていないか確認してください（よくある原因です）。',
     OverconstrainedError: '要求した解像度にカメラが対応していません。',
-    AbortError: 'カメラの初期化が中断されました。USBを挿し直してから再試行してください。',
+    AbortError: '起動がタイムアウトしました。仮想カメラ（NDI / OBS Virtual Camera / スマホ連携など）で送出元アプリが動作していない場合の典型的な症状です。物理カメラの場合はUSBを挿し直すか、ハブを介さずPCへ直結してください。',
     SecurityError: 'セキュアでないページではカメラを使用できません。localhost かローカルサーバー経由で開いてください。'
   };
+
+  // NDI / OBS Virtual Camera / スマホ連携アプリなどの仮想カメラは、送出元が動いていないと
+  // getUserMedia がタイムアウト(AbortError)する。実カメラより後回しにして自動選択の事故を防ぐ。
+  const VIRTUAL_CAM_PATTERN = /(ndi|obs|virtual|仮想|droidcam|iriun|xsplit|manycam|snap\s*camera|epoccam|camo|streamlabs|vtube|elgato\s*virtual)/i;
+  function looksVirtual(label){ return VIRTUAL_CAM_PATTERN.test(label || ''); }
 
   function describeStreamError(e){
     const name = (e && e.name) || 'Error';
@@ -666,13 +699,16 @@
       { deviceId:{ exact: deviceId }, width:{ ideal:1280 }, height:{ ideal:720 } },
       { deviceId:{ exact: deviceId } }
     ];
+    // 条件を緩めれば直る見込みがあるのは「解像度が合わない」「帯域が足りない」場合だけ。
+    // 権限拒否・デバイス不在・起動タイムアウトで緩めて再試行しても同じ結果を待たされるだけで、
+    // AbortError は1回あたり約10秒かかるため、体感が致命的に悪化する。
+    const RETRYABLE = ['OverconstrainedError', 'NotReadableError'];
     let lastErr;
     for (const video of attempts){
       try { return await navigator.mediaDevices.getUserMedia({ video, audio:false }); }
       catch(e){
         lastErr = e;
-        // 権限拒否・デバイス不在は条件を緩めても直らないので即中断
-        if (e && (e.name === 'NotAllowedError' || e.name === 'NotFoundError')) break;
+        if (!e || RETRYABLE.indexOf(e.name) === -1) break;
       }
     }
     throw lastErr;
