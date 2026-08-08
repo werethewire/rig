@@ -247,9 +247,11 @@
 
   let OUT_W = 1280, OUT_H = 720;
   let WORK_TARGET_W = 448;          // 背景差分マットを計算する解像度（幅）
-  const PLATE_FRAMES = 45;          // 背景プレートの平均フレーム数
+  const PLATE_FRAMES = 90;          // 背景プレートの平均フレーム数（約3秒）
   const SIGMA_FLOOR = 2.0;          // ピクセルノイズσの下限（センサーノイズ除去が効いた素材対策）
-  const SIGMA_CAP = 10.0;           // σの上限（記録中に動いた領域が検出の死角になるのを防ぐ）
+  const SIGMA_CAP = 14.0;           // σの上限（記録中に動いた領域が検出の死角になるのを防ぐ）
+  const SIGMA_MARGIN = 1.5;         // 記録時のσは短時間の測定で過小評価になるため割り増す
+  const ABSORB_FRAMES = 240;        // これだけ連続で前景のままなら「背景が変わった」とみなす
 
   let cams = [];
   let camCounter = 0;
@@ -508,7 +510,7 @@
       previewCanvas: null, previewCtx: null,
       srcW: 0, srcH: 0,
       plate: { ready:false, mean:null, sigma:null },
-      capture: null, countdownTimer: null,
+      capture: null, tune: null, countdownTimer: null,
       gain: new Float32Array([1,1,1]),
       buffers: null, hasPrev: false,
       stats: { fg: 0 },
@@ -524,7 +526,8 @@
         gate:5,               // AI領域制限の膨張量（作業解像度幅の%）0で無効
         aiRescue:70,          // AI が人物と断言している内側を救済する強さ (%)
         autoGain:true,        // 露出ドリフト補正
-        bgAdapt:true,         // 背景プレートの緩やか追従
+        bgAdapt:true,         // 背景プレートとノイズ推定の走行中学習
+        absorbStatic:true,    // 長時間居座る前景を背景として取り込む
         showMatte:false
       },
       stopped: false, ready: false, el: null
@@ -619,6 +622,7 @@
       <div class="ch-plate">
         <div class="ch-plate-btns">
           <button class="btn amber ch-plate-btn">■ 背景を記録</button>
+          <button class="btn ch-tune-btn" title="人が居ない状態で押すと、残っている背景を誤検出とみなして消し込みます">◎ 背景を追い込む</button>
           <button class="btn ch-lock-btn" title="露出・ホワイトバランス・フォーカスの自動追従を止めます（対応カメラのみ）">🔒 カメラ設定を固定</button>
           <button class="btn ch-reconnect-btn" title="映像が止まった・カメラを抜き差しした場合に開き直します">↻ 再接続</button>
         </div>
@@ -645,7 +649,8 @@
           <div class="ctrl-toggles">
             <label><input type="checkbox" class="ctrl-smooth" checked>ちらつき軽減</label>
             <label><input type="checkbox" class="ctrl-autogain" checked>露出ドリフト補正</label>
-            <label><input type="checkbox" class="ctrl-bgadapt" checked>背景の緩やか追従</label>
+            <label><input type="checkbox" class="ctrl-bgadapt" checked>背景の学習</label>
+            <label><input type="checkbox" class="ctrl-absorb" checked>残った背景を取り込む</label>
           </div>
         </div>
       </details>
@@ -861,6 +866,8 @@
       a: new Float32Array(n),
       prev: new Float32Array(n),
       seg: new Float32Array(n),
+      gate: new Float32Array(n),
+      fgAge: new Uint16Array(n),
       t1: new Float32Array(n),
       t2: new Float32Array(n),
       t3: new Float32Array(n),
@@ -878,6 +885,7 @@
   function invalidatePlate(cam){
     if (cam.plate) cam.plate.ready = false;
     cam.capture = null;
+    cam.tune = null;
     if (cam.countdownTimer){ clearTimeout(cam.countdownTimer); cam.countdownTimer = null; }
     cam.hasPrev = false;
     plateStatusIdle(cam);
@@ -979,9 +987,13 @@
     }
     // ノイズ推定は空間的に均すと安定する
     boxBlur(t1, t2, w, h, 2, t3, acc);
-    // 上限を設けないと、記録中に何か動いた領域の σ が跳ね上がって
-    // そこだけ永久に検出されない「死角」になる
-    for (let i = 0; i < n; i++) sigma[i] = Math.min(SIGMA_CAP, Math.max(SIGMA_FLOOR, t2[i]));
+    // 記録の数秒間で測れるのは短期ノイズだけ。実際にはこれより大きく揺れるので割り増しておく
+    // （足りない分は動作中の σ 学習が引き上げる）。上限が無いと、記録中に何か動いた領域の
+    // σ が跳ね上がってそこだけ永久に検出されない「死角」になる。
+    for (let i = 0; i < n; i++){
+      sigma[i] = Math.min(SIGMA_CAP, Math.max(SIGMA_FLOOR, t2[i] * SIGMA_MARGIN));
+    }
+    cam.buffers.fgAge.fill(0);
 
     cam.plate.ready = true;
     cam.capture = null;
@@ -1023,21 +1035,46 @@
     upd(0, sc0, sp0); upd(1, sc1, sp1); upd(2, sc2, sp2);
   }
 
-  // 背景と確信できた画素だけ、プレートを現フレームへ非常にゆっくり寄せる。
-  // ゲインで説明しきれなかった残差（局所的な明るさの変化など）だけを吸収するので
-  // ゲイン補正と競合しない。静止した人物が背景に溶けることもない（前景画素は更新しないため）。
-  function adaptPlate(cam, cur, aNow){
-    if (!cam.settings.bgAdapt) return;
+  // 背景と判断できた画素について、プレートの平均とノイズ推定σを走行中に学習し続ける。
+  //
+  // なぜσを学習するのか: 記録の数秒間はカメラの時間方向ノイズリダクションが強く効くため
+  // σが不自然に小さく出る。その値をしきい値に使うと、実際の揺らぎがしきい値を超えて
+  // 背景が部分的に残る。実環境の残差からσを測り直すのが唯一まともな解決策になる。
+  // σは「上げるのは速く、下げるのはゆっくり」— 残った背景が1秒以内に消え、
+  // 一度上がったしきい値がノイズの谷で不用意に戻らないようにする。
+  //
+  // 背景と判断する根拠は3つ:
+  //   ・差分マットが背景と言っている
+  //   ・AIが人物領域の外だと言っている（差分が誤って前景にしていても背景と確定できる）
+  //   ・長時間ずっと前景のまま動かない（＝物が動かされた等、背景そのものが変わった）
+  function adaptPlate(cam, cur, aNow, gateBuf, forceAll){
+    if (!forceAll && !cam.settings.bgAdapt) return;
     const n = cam.work.w * cam.work.h;
-    const mean = cam.plate.mean;
+    const mean = cam.plate.mean, sigma = cam.plate.sigma;
+    const fgAge = cam.buffers.fgAge;
     const gr = cam.gain[0], gg = cam.gain[1], gb = cam.gain[2];
-    const R = 0.005, IR = 1 - R;
+    const R = 0.005, RS_UP = 0.06, RS_DN = 0.002;
+    const absorb = cam.settings.absorbStatic;
+
     for (let i = 0; i < n; i++){
-      if (aNow[i] > 0.08) continue;
+      const stale = absorb && fgAge[i] >= ABSORB_FRAMES;
+      if (!forceAll && !(aNow[i] <= 0.08 || (gateBuf && gateBuf[i] < 0.02) || stale)) continue;
+
       const i3 = i * 3, i4 = i * 4;
-      mean[i3]   = mean[i3]   * IR + (cur[i4]   / gr) * R;
-      mean[i3+1] = mean[i3+1] * IR + (cur[i4+1] / gg) * R;
-      mean[i3+2] = mean[i3+2] * IR + (cur[i4+2] / gb) * R;
+      const cr = cur[i4] / gr, cg = cur[i4+1] / gg, cb = cur[i4+2] / gb;
+      const dr = cr - mean[i3], dg = cg - mean[i3+1], db = cb - mean[i3+2];
+
+      const dev2 = (dr*dr + dg*dg + db*db) / 3;
+      const s2 = sigma[i] * sigma[i];
+      const rs = dev2 > s2 ? RS_UP : RS_DN;
+      let ns = Math.sqrt(s2 * (1 - rs) + dev2 * rs);
+      sigma[i] = ns < SIGMA_FLOOR ? SIGMA_FLOOR : (ns > SIGMA_CAP ? SIGMA_CAP : ns);
+
+      // 長く居座っているものは早めに背景へ取り込む
+      const rr = stale ? R * 4 : R;
+      mean[i3]   += dr * rr;
+      mean[i3+1] += dg * rr;
+      mean[i3+2] += db * rr;
     }
   }
 
@@ -1145,7 +1182,7 @@
   function processFrame(cam, haveSeg){
     const { w, h } = cam.work, n = w * h;
     const s = cam.settings;
-    const { a, prev, seg, t1, t2, t3, acc } = cam.buffers;
+    const { a, prev, seg, gate, t1, t2, t3, acc } = cam.buffers;
 
     const usePlate = cam.plate.ready && (s.matteMode === 'hybrid' || s.matteMode === 'diff');
     const useSeg = haveSeg && (s.matteMode === 'hybrid' || s.matteMode === 'ai');
@@ -1159,11 +1196,36 @@
     if (usePlate){
       diffMatte(cam, cur, a);
 
+      // 前景で居座り続けている時間を数える（背景そのものが変わった箇所の検出に使う）
+      const fgAge = cam.buffers.fgAge;
+      for (let i = 0; i < n; i++){
+        if (a[i] > 0.5){ if (fgAge[i] < 65000) fgAge[i]++; }
+        else fgAge[i] = 0;
+      }
+
+      // AI ゲートは学習にも使うので先に求めておく（後段の denoise が t1〜t3 を潰すため専用バッファ）
+      let gateBuf = null;
+      if (useSeg && s.gate > 0){
+        boxBlur(seg, gate, w, h, Math.max(1, Math.round(w * s.gate / 100)), t2, acc);
+        gateBuf = gate;
+      }
+
       // ゲイン／プレート追従は、このフレーム自身の判定結果を使って前景を除外してから行う
-      cam.stats.fg = foregroundRatio(a, n);
-      if (cam.stats.fg < 0.55){
+      const fgRaw = foregroundRatio(a, n);
+      if (cam.tune){
+        // 「背景を追い込む」実行中。人が居ないことを操作者が保証しているので、
+        // 残っている前景はすべて誤検出＝ノイズ推定が足りない証拠として学習に回す。
+        adaptPlate(cam, cur, a, null, true);
+        cam.tune.frames++;
+        if (cam.tune.frames >= cam.tune.target){
+          cam.tune = null;
+          plateStatusIdle(cam);
+        } else if (cam.tune.frames % 10 === 0){
+          setChStatus(cam, `背景を追い込み中… ${cam.tune.frames}/${cam.tune.target}（残り ${(fgRaw*100).toFixed(0)}%）`, 'busy');
+        }
+      } else if (fgRaw < 0.55){
         updateGain(cam, cur, a);
-        adaptPlate(cam, cur, a);
+        adaptPlate(cam, cur, a, gateBuf);
         renormalizeGain(cam);
       }
 
@@ -1174,9 +1236,7 @@
       //   ・膨張マスク  → 範囲の制限（背景側の写り込みや動かされた物を排除）
       //   ・収縮マスク  → 救済（AIが人物と断言している内側は差分が拾えなくても残す）
       // 輪郭そのものは差分マット（＝カメラ解像度由来）の鋭さを保つ。
-      if (useSeg && s.gate > 0){
-        const gr = Math.max(1, Math.round(w * s.gate / 100));
-        boxBlur(seg, t1, w, h, gr, t2, acc);
+      if (gateBuf){
         const rescue = s.aiRescue / 100;
         if (rescue > 0){
           // 救済に使う「核」は AI マスクを大きめに収縮させたもの。収縮が小さいと
@@ -1185,7 +1245,7 @@
           boxBlur(seg, t3, w, h, cr, t2, acc);
         }
         for (let i = 0; i < n; i++){
-          const gv = (t1[i] - 0.02) / 0.10;
+          const gv = (gateBuf[i] - 0.02) / 0.10;
           let v = a[i] * (gv <= 0 ? 0 : (gv >= 1 ? 1 : gv));
           if (rescue > 0){
             const cv = (t3[i] - 0.88) / 0.10;
@@ -1223,6 +1283,10 @@
       prev.set(a);
       cam.hasPrev = true;
     }
+
+    // 表示する前景率は、ノイズ除去やゲートを通した「実際に合成される」マットで測る。
+    // 生の差分で測ると、出力は真っ白なのに十数%と出て操作者を無用に迷わせる。
+    cam.stats.fg = foregroundRatio(a, n);
 
     const d = cam.matteImage.data;
     for (let i = 0; i < n; i++) d[i*4+3] = a[i] * 255;
@@ -1323,6 +1387,10 @@
       if (!t.checked){ cam.gain[0] = cam.gain[1] = cam.gain[2] = 1; }
     }
     else if (t.classList.contains('ctrl-bgadapt')){ cam.settings.bgAdapt = t.checked; }
+    else if (t.classList.contains('ctrl-absorb')){
+      cam.settings.absorbStatic = t.checked;
+      if (cam.buffers) cam.buffers.fgAge.fill(0);
+    }
     else if (t.classList.contains('ctrl-showmatte')){
       cam.settings.showMatte = t.checked;
       chEl.querySelector('.ch-preview').classList.toggle('matte', t.checked);
@@ -1347,6 +1415,11 @@
     if (e.target.classList.contains('ch-remove')){ removeCamera(chEl.dataset.id); return; }
     if (!cam) return;
     if (e.target.classList.contains('ch-plate-btn')) startPlateCapture(cam, 3);
+    else if (e.target.classList.contains('ch-tune-btn')){
+      if (!cam.plate.ready){ setChStatus(cam, '先に「■ 背景を記録」を実行してください。', 'warn'); return; }
+      cam.tune = { frames: 0, target: 120 };
+      setChStatus(cam, '背景を追い込み中… 人が写っていないことを確認してください', 'busy');
+    }
     else if (e.target.classList.contains('ch-lock-btn')) lockCameraSettings(cam);
     else if (e.target.classList.contains('ch-reconnect-btn')) reconnect(cam);
   });
