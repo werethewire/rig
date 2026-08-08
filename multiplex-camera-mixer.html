@@ -17,6 +17,7 @@
     --accent:#c9491f;   /* セーフライト・レッド */
     --accent-soft:#c9491f33;
     --amber:#e0a83e;    /* 現像タイマーのアンバー */
+    --ok:#7fb069;
     --mono:'IBM Plex Mono', monospace;
     --display:'Space Grotesk', sans-serif;
   }
@@ -52,8 +53,11 @@
   .btn:hover{border-color:var(--accent);}
   .btn.primary{background:var(--accent);border-color:var(--accent);color:#171310;font-weight:600;}
   .btn.primary:hover{background:#e05a2a;}
+  .btn.amber{background:var(--amber);border-color:var(--amber);color:#171310;font-weight:600;}
+  .btn.amber:hover{background:#efc063;}
   .btn:disabled{opacity:.35;cursor:not-allowed;}
   .btn:disabled:hover{border-color:var(--line);}
+  .hdr-label{font-family:var(--mono);font-size:11px;color:var(--text-dim);}
 
   main{flex:1;display:flex;gap:0;min-height:0;}
 
@@ -71,9 +75,11 @@
   }
   .stage-caption{margin-top:12px;font-family:var(--mono);font-size:11px;color:var(--text-dim);letter-spacing:.04em;}
   .stage-caption b{color:var(--amber);font-weight:600;}
+  .stage-tip{margin-top:8px;max-width:760px;font-family:var(--mono);font-size:11px;color:var(--text-dim);line-height:1.75;}
+  .stage-tip b{color:var(--amber);font-weight:600;}
 
   .rack{
-    width:340px;flex:none;border-left:1px solid var(--line);
+    width:380px;flex:none;border-left:1px solid var(--line);
     background:var(--panel);overflow-y:auto;padding:16px;
     display:flex;flex-direction:column;gap:14px;
   }
@@ -103,25 +109,49 @@
     border:1px solid var(--line);position:relative;
   }
   .ch-preview video{width:100%;height:100%;object-fit:cover;display:block;}
+  .ch-preview canvas{position:absolute;inset:0;width:100%;height:100%;display:none;background:#000;}
+  .ch-preview.matte canvas{display:block;}
 
   .ch-controls{flex:1;display:flex;flex-direction:column;gap:7px;min-width:0;}
   .ctrl-row{display:flex;align-items:center;gap:8px;}
   .ctrl-row label{
-    font-family:var(--mono);font-size:10px;color:var(--text-dim);width:44px;flex:none;letter-spacing:.03em;
+    font-family:var(--mono);font-size:10px;color:var(--text-dim);width:64px;flex:none;letter-spacing:.03em;
   }
   .ctrl-row input[type=range]{
-    flex:1;accent-color:var(--accent);height:14px;
+    flex:1;accent-color:var(--accent);height:14px;min-width:0;
   }
   .ctrl-row .val{font-family:var(--mono);font-size:10px;color:var(--text-dim);width:34px;text-align:right;flex:none;}
-  .ctrl-toggles{display:flex;gap:10px 14px;margin-top:2px;flex-wrap:wrap;}
+  .ctrl-toggles{display:flex;gap:8px 14px;margin-top:2px;flex-wrap:wrap;}
   .ctrl-toggles label{
     display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;color:var(--text-dim);cursor:pointer;
   }
   .ctrl-toggles input{accent-color:var(--accent);}
 
+  .ch-plate{padding:0 10px 10px;display:flex;flex-direction:column;gap:6px;}
+  .ch-plate-btns{display:flex;gap:6px;flex-wrap:wrap;}
+  .ch-plate-btns .btn{padding:6px 10px;font-size:10px;}
+  .ch-status{
+    font-family:var(--mono);font-size:10px;color:var(--text-dim);line-height:1.6;
+    border-left:2px solid var(--line);padding-left:8px;
+  }
+  .ch-status.ok{color:var(--ok);border-left-color:var(--ok);}
+  .ch-status.warn{color:var(--amber);border-left-color:var(--amber);}
+  .ch-status.busy{color:var(--accent);border-left-color:var(--accent);}
+
+  details.adv{border-top:1px solid var(--line);}
+  details.adv > summary{
+    font-family:var(--mono);font-size:10px;color:var(--text-dim);
+    padding:7px 10px;cursor:pointer;letter-spacing:.05em;list-style:none;
+  }
+  details.adv > summary::-webkit-details-marker{display:none;}
+  details.adv > summary::before{content:'▸ ';color:var(--amber);}
+  details.adv[open] > summary::before{content:'▾ ';}
+  details.adv > summary:hover{color:var(--text);}
+  .adv-body{padding:0 10px 10px;display:flex;flex-direction:column;gap:7px;}
+
   footer{
     padding:10px 28px;border-top:1px solid var(--line);
-    font-family:var(--mono);font-size:10px;color:var(--text-dim);letter-spacing:.03em;
+    font-family:var(--mono);font-size:10px;color:var(--text-dim);letter-spacing:.03em;line-height:1.7;
   }
 
   @media (max-width:860px){
@@ -143,15 +173,22 @@
       </div>
     </div>
     <div class="global-controls">
-      <label style="font-family:var(--mono);font-size:11px;color:var(--text-dim);">出力
+      <label class="hdr-label">出力
         <select id="outSize">
           <option value="1280x720" selected>1280×720</option>
           <option value="1920x1080">1920×1080</option>
           <option value="960x540">960×540</option>
         </select>
       </label>
+      <label class="hdr-label">処理解像度
+        <select id="workQuality" title="背景差分マットの計算解像度。高いほど輪郭が精密になりますが負荷が上がります。">
+          <option value="320">低 (320)</option>
+          <option value="448" selected>標準 (448)</option>
+          <option value="640">高 (640)</option>
+        </select>
+      </label>
+      <button class="btn amber" id="plateAllBtn" title="全CHの背景プレートをまとめて記録します（画面内に人が入っていない状態で実行）">■ 全CHの背景を記録</button>
       <button class="btn" id="refreshBtn" title="接続中のカメラを再検出します">⟳ デバイス再検出</button>
-      <button class="btn" id="snapshotBtn">静止画を保存</button>
       <button class="btn primary" id="addCamBtn">＋ カメラを追加</button>
     </div>
   </header>
@@ -164,7 +201,12 @@
         <div class="stage-note" id="stageNote">右側の「カメラを追加」から映像を追加してください。<br>各映像は背景が除去され、人物のモノクロ画像として乗算合成されます。</div>
       </div>
       <div class="stage-caption" id="stageCaption"></div>
-      <div class="stage-caption" style="margin-top:2px;">Tip: 無地の背景・被写体への均一な照明・カメラから1〜2m以内の距離だと抽出精度が上がります。各CHの「抽出精度」を高精度、「輪郭鋭さ」を高めにすると背景の写り込みが減ります。</div>
+      <div class="stage-tip">
+        <b>精度を最大にする手順（カメラ固定・照明不変の場合）</b><br>
+        ① カメラを設置して固定 → ② 各CHの「カメラ設定を固定」を押して露出・WB・フォーカスをロック →
+        ③ <b>画面内から人を出して</b>「背景を記録」→ ④ 抽出方式は「AI＋背景差分」のまま使用。<br>
+        背景プレートを記録すると、AI単体より輪郭が格段に精密になります。カメラを動かした・照明を変えた場合は必ず記録し直してください。
+      </div>
     </div>
 
     <div class="rack" id="rack">
@@ -173,8 +215,9 @@
   </main>
 
   <footer>
-    人物抽出には MediaPipe Selfie Segmentation を使用（初回読み込みにインターネット接続が必要）。カメラはブラウザの権限許可が必要です。file:// で開いてカメラが起動しない場合は、ローカルサーバー経由（例: <code>python3 -m http.server</code>）で開いてください。<br>
-    外付けUSBカメラが選択肢に出ない場合: ①OSのカメラ権限（Windows「カメラのプライバシー設定」/ macOS「システム設定 > プライバシーとセキュリティ > カメラ」）でブラウザが許可されているか確認 ②他のアプリ（Zoom・Teams・OBS等）がそのカメラを使用中でないか確認 ③USB接続後に「⟳ デバイス再検出」を押す ④それでも出ない場合はブラウザを再起動。
+    人物抽出には MediaPipe Selfie Segmentation ＋ 背景プレート差分マット（Horprasert 方式の色歪み／明度歪み分解・ピクセル毎ノイズ適応しきい値・影抑制・露出ドリフト補正）を使用。MediaPipe の初回読み込みにインターネット接続が必要です。<br>
+    カメラはブラウザの権限許可が必要です。file:// で開いてカメラが起動しない場合は、ローカルサーバー経由（例: <code>python3 -m http.server</code>）で開いてください。<br>
+    外付けUSBカメラが選択肢に出ない場合: ①OSのカメラ権限（Windows「カメラのプライバシー設定」/ macOS「システム設定 &gt; プライバシーとセキュリティ &gt; カメラ」）でブラウザが許可されているか確認 ②他のアプリ（Zoom・Teams・OBS等）がそのカメラを使用中でないか確認 ③USB接続後に「⟳ デバイス再検出」を押す ④それでも出ない場合はブラウザを再起動。
   </footer>
 </div>
 
@@ -190,12 +233,17 @@
   const stageCaption = document.getElementById('stageCaption');
   const addCamBtn = document.getElementById('addCamBtn');
   const refreshBtn = document.getElementById('refreshBtn');
-  const snapshotBtn = document.getElementById('snapshotBtn');
+  const plateAllBtn = document.getElementById('plateAllBtn');
   const outSizeSel = document.getElementById('outSize');
+  const workQualitySel = document.getElementById('workQuality');
   const deviceStatus = document.getElementById('deviceStatus');
 
   let OUT_W = 1280, OUT_H = 720;
-  let cams = [];      // {id, deviceId, stream, videoEl, segmenter, maskCanvas, layerCanvas, settings, stopped, el}
+  let WORK_TARGET_W = 448;          // 背景差分マットを計算する解像度（幅）
+  const PLATE_FRAMES = 45;          // 背景プレートの平均フレーム数
+  const SIGMA_FLOOR = 2.0;          // ピクセルノイズσの下限（センサーノイズ除去が効いた素材対策）
+
+  let cams = [];
   let camCounter = 0;
   let deviceCache = [];
   let lastPermissionError = null;
@@ -209,13 +257,50 @@
     return { sx, sy, scw, sch };
   }
 
+  const clamp01 = v => v < 0 ? 0 : (v > 1 ? 1 : v);
+
+  // 積分和による分離型ボックスブラー（O(n)）。縦方向も行順アクセスにしてキャッシュ効率を確保する。
+  function boxBlur(src, dst, w, h, r, tmp, acc){
+    if (r <= 0){ dst.set(src); return; }
+    const norm = 1 / (2 * r + 1);
+    // 横方向
+    for (let y = 0; y < h; y++){
+      const row = y * w;
+      let sum = 0;
+      for (let x = -r; x <= r; x++){
+        const xi = x < 0 ? 0 : (x > w - 1 ? w - 1 : x);
+        sum += src[row + xi];
+      }
+      for (let x = 0; x < w; x++){
+        tmp[row + x] = sum * norm;
+        const xa = x + r + 1, xs = x - r;
+        sum += src[row + (xa > w - 1 ? w - 1 : xa)] - src[row + (xs < 0 ? 0 : xs)];
+      }
+    }
+    // 縦方向（列ごとの累積を配列で保持して行順に走査）
+    acc.fill(0);
+    for (let y = -r; y <= r; y++){
+      const row = (y < 0 ? 0 : (y > h - 1 ? h - 1 : y)) * w;
+      for (let x = 0; x < w; x++) acc[x] += tmp[row + x];
+    }
+    for (let y = 0; y < h; y++){
+      const o = y * w;
+      for (let x = 0; x < w; x++) dst[o + x] = acc[x] * norm;
+      const ya = y + r + 1, ys = y - r;
+      const addRow = (ya > h - 1 ? h - 1 : ya) * w;
+      const subRow = (ys < 0 ? 0 : ys) * w;
+      for (let x = 0; x < w; x++) acc[x] += tmp[addRow + x] - tmp[subRow + x];
+    }
+  }
+
   function updateStageState(){
     const active = cams.some(c => c.ready);
     stageNote.style.display = active ? 'none' : 'flex';
     addCamBtn.disabled = cams.length >= MAX_CAMS;
+    plateAllBtn.disabled = !cams.some(c => c.ready);
     rackEmpty.style.display = cams.length ? 'none' : 'block';
     stageCaption.innerHTML = cams.length
-      ? `合成中の CH: <b>${cams.filter(c=>c.settings.enabled).length}</b> / ${cams.length}`
+      ? `合成中の CH: <b>${cams.filter(c=>c.settings.enabled).length}</b> / ${cams.length}　背景プレート記録済み: <b>${cams.filter(c=>c.plate.ready).length}</b> / ${cams.length}`
       : '';
   }
 
@@ -230,6 +315,12 @@
   outSizeSel.addEventListener('change', () => {
     const [w,h] = outSizeSel.value.split('x').map(Number);
     resizeOutput(w,h);
+  });
+
+  // 処理解像度の変更は作業バッファを作り直すため、背景プレートは無効になる
+  workQualitySel.addEventListener('change', () => {
+    WORK_TARGET_W = parseInt(workQualitySel.value, 10) || 448;
+    cams.forEach(c => { if (c.plate.ready) setChStatus(c, '処理解像度が変わりました。背景を記録し直してください。', 'warn'); });
   });
 
   // ---------- デバイス列挙 ----------
@@ -331,7 +422,7 @@
     return lines.join('\n');
   }
 
-
+  // ---------- CH 追加 ----------
   async function addCamera(){
     if (cams.length >= MAX_CAMS) return;
     addCamBtn.disabled = true;
@@ -353,12 +444,34 @@
       id, deviceId: null, stream: null, videoEl: null, segmenter: null,
       maskCanvas: document.createElement('canvas'),
       layerCanvas: document.createElement('canvas'),
-      rawMaskCanvas: document.createElement('canvas'),
-      prevAlpha: null, loopStarted: false,
-      settings: { contrast:120, brightness:100, scale:100, x:0, y:0, invert:false, enabled:true,
-                  edgeSharpness:150, smoothing:true, modelQuality:'0', bgRemoval:true },
+      work: { w:0, h:0, canvas: document.createElement('canvas'), ctx:null },
+      segCanvas: document.createElement('canvas'), segCtx: null,
+      matteCanvas: document.createElement('canvas'), matteCtx: null, matteImage: null,
+      previewCanvas: null, previewCtx: null,
+      srcW: 0, srcH: 0,
+      plate: { ready:false, mean:null, sigma:null },
+      capture: null, countdownTimer: null,
+      gain: new Float32Array([1,1,1]),
+      buffers: null, hasPrev: false,
+      settings: {
+        contrast:120, brightness:100, scale:100, x:0, y:0, invert:false, enabled:true,
+        edgeSharpness:150, smoothing:true, modelQuality:'0',
+        matteMode:'hybrid',   // hybrid | diff | ai | off
+        bgThresh:5,           // 色歪みしきい値（σの倍数）
+        shadowTol:35,         // 影として無視する暗さの許容 (%)
+        feather:2,            // エッジぼかし半径（作業解像度px）
+        choke:0,              // マット収縮 -10..10
+        denoise:1,            // 点ノイズ除去（オープニング半径）
+        gate:5,               // AI領域制限の膨張量（作業解像度幅の%）0で無効
+        autoGain:true,        // 露出ドリフト補正
+        showMatte:false
+      },
       stopped: false, ready: false, el: null
     };
+    cam.work.ctx = cam.work.canvas.getContext('2d', { willReadFrequently:true });
+    cam.segCtx = cam.segCanvas.getContext('2d', { willReadFrequently:true });
+    cam.matteCtx = cam.matteCanvas.getContext('2d');
+    cam.maskCtx = cam.maskCanvas.getContext('2d');
     cam.maskCanvas.width = OUT_W; cam.maskCanvas.height = OUT_H;
     cam.layerCanvas.width = OUT_W; cam.layerCanvas.height = OUT_H;
 
@@ -366,6 +479,8 @@
     cam.el = el;
     rack.appendChild(el);
     cams.push(cam);
+    cam.previewCanvas = el.querySelector('.ch-matte');
+    cam.previewCtx = cam.previewCanvas.getContext('2d');
     updateStageState();
 
     await startStream(cam, defaultDevice.deviceId);
@@ -388,42 +503,94 @@
         <button class="ch-remove" title="このCHを削除">✕</button>
       </div>
       <div class="ch-body">
-        <div class="ch-preview"><video autoplay playsinline muted></video></div>
+        <div class="ch-preview"><video autoplay playsinline muted></video><canvas class="ch-matte" width="96" height="72"></canvas></div>
         <div class="ch-controls">
-          <div class="ctrl-row"><label>抽出精度</label>
-            <select class="ctrl-model" style="flex:1;font-size:10px;padding:4px 6px;">
+          <div class="ctrl-row"><label>抽出方式</label>
+            <select class="ctrl-mode" style="flex:1;font-size:10px;padding:4px 6px;min-width:0;">
+              <option value="hybrid" selected>AI ＋ 背景差分（推奨）</option>
+              <option value="diff">背景差分のみ（最も鋭い）</option>
+              <option value="ai">AI のみ</option>
+              <option value="off">除去しない</option>
+            </select>
+          </div>
+          <div class="ctrl-row"><label>差分しきい</label><input type="range" class="ctrl-thresh" min="1" max="20" value="5"><span class="val">5</span></div>
+          <div class="ctrl-row"><label>影の許容</label><input type="range" class="ctrl-shadow" min="0" max="80" value="35"><span class="val">35%</span></div>
+          <div class="ctrl-row"><label>コントラ</label><input type="range" class="ctrl-contrast" min="50" max="300" value="120"><span class="val">120%</span></div>
+          <div class="ctrl-row"><label>明るさ</label><input type="range" class="ctrl-brightness" min="50" max="200" value="100"><span class="val">100%</span></div>
+          <div class="ctrl-row"><label>サイズ</label><input type="range" class="ctrl-scale" min="20" max="200" value="100"><span class="val">100%</span></div>
+          <div class="ctrl-toggles">
+            <label><input type="checkbox" class="ctrl-enabled" checked>合成に使用</label>
+            <label><input type="checkbox" class="ctrl-invert">階調反転</label>
+            <label><input type="checkbox" class="ctrl-showmatte">マット確認</label>
+          </div>
+        </div>
+      </div>
+      <div class="ch-plate">
+        <div class="ch-plate-btns">
+          <button class="btn amber ch-plate-btn">■ 背景を記録</button>
+          <button class="btn ch-lock-btn" title="露出・ホワイトバランス・フォーカスの自動追従を止めます（対応カメラのみ）">🔒 カメラ設定を固定</button>
+        </div>
+        <div class="ch-status warn">背景プレート未記録 — AI のみで抽出中</div>
+      </div>
+      <details class="adv">
+        <summary>詳細設定</summary>
+        <div class="adv-body">
+          <div class="ctrl-row"><label>AI精度</label>
+            <select class="ctrl-model" style="flex:1;font-size:10px;padding:4px 6px;min-width:0;">
               <option value="0" selected>高精度（近距離向け）</option>
               <option value="1">高速（広角向け）</option>
             </select>
           </div>
-          <div class="ctrl-row"><label>輪郭鋭さ</label><input type="range" class="ctrl-edge" min="0" max="200" value="150"><span class="val">150</span></div>
-          <div class="ctrl-row"><label>コントラ</label><input type="range" class="ctrl-contrast" min="50" max="300" value="120"><span class="val">120%</span></div>
-          <div class="ctrl-row"><label>明るさ</label><input type="range" class="ctrl-brightness" min="50" max="200" value="100"><span class="val">100%</span></div>
-          <div class="ctrl-row"><label>サイズ</label><input type="range" class="ctrl-scale" min="20" max="200" value="100"><span class="val">100%</span></div>
+          <div class="ctrl-row"><label>輪郭鋭さ</label><input type="range" class="ctrl-edge" min="0" max="300" value="150"><span class="val">150</span></div>
+          <div class="ctrl-row"><label>エッジぼかし</label><input type="range" class="ctrl-feather" min="0" max="8" value="2"><span class="val">2</span></div>
+          <div class="ctrl-row"><label>収縮</label><input type="range" class="ctrl-choke" min="-10" max="10" value="0"><span class="val">0</span></div>
+          <div class="ctrl-row"><label>ノイズ除去</label><input type="range" class="ctrl-denoise" min="0" max="3" value="1"><span class="val">1</span></div>
+          <div class="ctrl-row"><label>AI領域制限</label><input type="range" class="ctrl-gate" min="0" max="20" value="5"><span class="val">5%</span></div>
           <div class="ctrl-row"><label>X位置</label><input type="range" class="ctrl-x" min="-100" max="100" value="0"><span class="val">0</span></div>
           <div class="ctrl-row"><label>Y位置</label><input type="range" class="ctrl-y" min="-100" max="100" value="0"><span class="val">0</span></div>
           <div class="ctrl-toggles">
-            <label><input type="checkbox" class="ctrl-enabled" checked>合成に使用</label>
-            <label><input type="checkbox" class="ctrl-bg" checked>背景除去</label>
-            <label><input type="checkbox" class="ctrl-invert">階調反転</label>
             <label><input type="checkbox" class="ctrl-smooth" checked>ちらつき軽減</label>
+            <label><input type="checkbox" class="ctrl-autogain" checked>露出ドリフト補正</label>
           </div>
         </div>
-      </div>
+      </details>
     `;
     cam.videoEl = wrap.querySelector('video');
     return wrap;
   }
 
+  function setChStatus(cam, text, cls){
+    if (!cam.el) return;
+    const el = cam.el.querySelector('.ch-status');
+    el.textContent = text;
+    el.className = 'ch-status' + (cls ? ' ' + cls : '');
+  }
+
+  function plateStatusIdle(cam){
+    if (cam.plate.ready){
+      setChStatus(cam, `背景プレート記録済み（${cam.work.w}×${cam.work.h}） — 差分マット有効`, 'ok');
+    } else {
+      setChStatus(cam, '背景プレート未記録 — AI のみで抽出中', 'warn');
+    }
+  }
+
+  // ---------- ストリーム ----------
   async function startStream(cam, deviceId){
     try {
+      // 解像度を明示要求しないと 640×480 で開くカメラが多く、マットの精度が頭打ちになる
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { deviceId: { exact: deviceId } }, audio: false
+        video: {
+          deviceId: { exact: deviceId },
+          width: { ideal: 1280 }, height: { ideal: 720 },
+          frameRate: { ideal: 30 }
+        },
+        audio: false
       });
       cam.stream = stream;
       cam.deviceId = deviceId;
       cam.videoEl.srcObject = stream;
       await cam.videoEl.play().catch(()=>{});
+      invalidatePlate(cam);
       createSegmenter(cam);
       if (!cam.loopStarted){ cam.loopStarted = true; processLoop(cam); }
       cam.ready = true;
@@ -433,6 +600,50 @@
     }
   }
 
+  // 露出・WB・フォーカスの自動追従は背景差分の最大の敵。可能な範囲でマニュアル固定する。
+  // AE が収束するのを待ってから、その時点の値で固定するのが最も安定する。
+  async function lockCameraSettings(cam){
+    const track = cam.stream && cam.stream.getVideoTracks()[0];
+    if (!track || !track.getCapabilities){
+      setChStatus(cam, 'このブラウザはカメラ設定の固定に対応していません。', 'warn');
+      return;
+    }
+    setChStatus(cam, '露出の収束を待っています…', 'busy');
+    await new Promise(r => setTimeout(r, 1200));
+    let caps = {}, cur = {};
+    try { caps = track.getCapabilities() || {}; cur = track.getSettings() || {}; } catch(e){ /* ignore */ }
+
+    const applied = [], failed = [];
+    const tryApply = async (label, constraint) => {
+      try { await track.applyConstraints({ advanced: [constraint] }); applied.push(label); }
+      catch(e){ failed.push(label); }
+    };
+
+    if (caps.exposureMode && caps.exposureMode.includes('manual')){
+      const c = { exposureMode: 'manual' };
+      if (cur.exposureTime != null) c.exposureTime = cur.exposureTime;
+      await tryApply('露出', c);
+    } else failed.push('露出');
+
+    if (caps.whiteBalanceMode && caps.whiteBalanceMode.includes('manual')){
+      const c = { whiteBalanceMode: 'manual' };
+      if (cur.colorTemperature != null) c.colorTemperature = cur.colorTemperature;
+      await tryApply('WB', c);
+    } else failed.push('WB');
+
+    if (caps.focusMode && caps.focusMode.includes('manual')){
+      const c = { focusMode: 'manual' };
+      if (cur.focusDistance != null) c.focusDistance = cur.focusDistance;
+      await tryApply('フォーカス', c);
+    } else failed.push('フォーカス');
+
+    const parts = [];
+    if (applied.length) parts.push('固定: ' + applied.join('/'));
+    if (failed.length) parts.push('非対応: ' + failed.join('/'));
+    setChStatus(cam, parts.join('　') + (failed.length ? '（非対応分は露出ドリフト補正が吸収します）' : ''), applied.length ? 'ok' : 'warn');
+    setTimeout(() => plateStatusIdle(cam), 4000);
+  }
+
   function createSegmenter(cam){
     const seg = new SelfieSegmentation({
       locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`
@@ -440,7 +651,7 @@
     seg.setOptions({ modelSelection: parseInt(cam.settings.modelQuality, 10) || 0 });
     seg.onResults((results) => onSegResults(cam, results));
     cam.segmenter = seg;
-    cam.prevAlpha = null; // モデル切替時は平滑化バッファをリセット
+    cam.hasPrev = false;
   }
 
   function reinitModel(cam){
@@ -451,86 +662,331 @@
     }
   }
 
+  // ---------- 作業バッファ ----------
+  function allocBuffers(cam){
+    const { w, h } = cam.work;
+    const n = w * h;
+    cam.buffers = {
+      a: new Float32Array(n),
+      prev: new Float32Array(n),
+      seg: new Float32Array(n),
+      t1: new Float32Array(n),
+      t2: new Float32Array(n),
+      t3: new Float32Array(n),
+      acc: new Float32Array(w)
+    };
+    cam.plate = { ready:false, mean:new Float32Array(n*3), sigma:new Float32Array(n) };
+    cam.hasPrev = false;
+    cam.gain[0] = cam.gain[1] = cam.gain[2] = 1;
+
+    cam.matteImage = cam.matteCtx.createImageData(w, h);
+    const d = cam.matteImage.data;
+    for (let i = 0; i < n; i++){ d[i*4] = 255; d[i*4+1] = 255; d[i*4+2] = 255; d[i*4+3] = 255; }
+  }
+
+  function invalidatePlate(cam){
+    if (cam.plate) cam.plate.ready = false;
+    cam.capture = null;
+    if (cam.countdownTimer){ clearTimeout(cam.countdownTimer); cam.countdownTimer = null; }
+    cam.hasPrev = false;
+    plateStatusIdle(cam);
+  }
+
+  // 映像の解像度・処理解像度に合わせて作業キャンバスを用意する。変化したらプレートは破棄。
+  function ensureWork(cam){
+    const vw = cam.videoEl.videoWidth, vh = cam.videoEl.videoHeight;
+    if (!vw || !vh) return false;
+    const w = Math.max(64, Math.round(Math.min(WORK_TARGET_W, vw)));
+    const h = Math.max(36, Math.round(w * vh / vw));
+    if (cam.work.w !== w || cam.work.h !== h || cam.srcW !== vw || cam.srcH !== vh){
+      const hadPlate = cam.plate && cam.plate.ready;
+      cam.work.w = w; cam.work.h = h; cam.srcW = vw; cam.srcH = vh;
+      cam.work.canvas.width = w; cam.work.canvas.height = h;
+      cam.segCanvas.width = w; cam.segCanvas.height = h;
+      cam.matteCanvas.width = w; cam.matteCanvas.height = h;
+      allocBuffers(cam);
+      if (hadPlate) setChStatus(cam, '解像度が変わったため背景プレートを破棄しました。記録し直してください。', 'warn');
+      else plateStatusIdle(cam);
+      updateStageState();
+    }
+    return true;
+  }
+
+  function grabWork(cam){
+    const { w, h, ctx } = cam.work;
+    ctx.drawImage(cam.videoEl, 0, 0, w, h);
+    return ctx.getImageData(0, 0, w, h).data;
+  }
+
+  // ---------- 背景プレート ----------
+  function startPlateCapture(cam, countdown){
+    if (!cam.ready) return;
+    if (cam.countdownTimer){ clearTimeout(cam.countdownTimer); cam.countdownTimer = null; }
+    const tick = (left) => {
+      if (cam.stopped) return;
+      if (left > 0){
+        setChStatus(cam, `背景を記録します — 画面から出てください… ${left}`, 'busy');
+        cam.countdownTimer = setTimeout(() => tick(left - 1), 1000);
+        return;
+      }
+      cam.countdownTimer = null;
+      const n = cam.work.w * cam.work.h;
+      if (!n) { plateStatusIdle(cam); return; }
+      cam.capture = {
+        frames: 0, target: PLATE_FRAMES,
+        sum: new Float64Array(n * 3),
+        sumSq: new Float64Array(n * 3)
+      };
+      setChStatus(cam, `背景記録中… 0/${PLATE_FRAMES}`, 'busy');
+    };
+    tick(countdown);
+  }
+
+  function capturePlateFrame(cam){
+    const cap = cam.capture;
+    const n = cam.work.w * cam.work.h;
+    const d = grabWork(cam);
+    const sum = cap.sum, sumSq = cap.sumSq;
+    for (let i = 0; i < n; i++){
+      const i3 = i * 3, i4 = i * 4;
+      const r = d[i4], g = d[i4+1], b = d[i4+2];
+      sum[i3] += r;   sumSq[i3] += r * r;
+      sum[i3+1] += g; sumSq[i3+1] += g * g;
+      sum[i3+2] += b; sumSq[i3+2] += b * b;
+    }
+    cap.frames++;
+    if (cap.frames >= cap.target) finishPlate(cam);
+    else setChStatus(cam, `背景記録中… ${cap.frames}/${cap.target}`, 'busy');
+  }
+
+  function finishPlate(cam){
+    const cap = cam.capture;
+    const { w, h } = cam.work, n = w * h;
+    const N = cap.frames;
+    const mean = cam.plate.mean, sigma = cam.plate.sigma;
+    const { t1, t2, t3, acc } = cam.buffers;
+
+    for (let i = 0; i < n; i++){
+      const i3 = i * 3;
+      let varSum = 0;
+      for (let c = 0; c < 3; c++){
+        const m = cap.sum[i3+c] / N;
+        mean[i3+c] = m;
+        const v = cap.sumSq[i3+c] / N - m * m;
+        varSum += v > 0 ? v : 0;
+      }
+      t1[i] = Math.sqrt(varSum / 3);
+    }
+    // ノイズ推定は空間的に均すと安定する
+    boxBlur(t1, t2, w, h, 2, t3, acc);
+    for (let i = 0; i < n; i++) sigma[i] = Math.max(SIGMA_FLOOR, t2[i]);
+
+    cam.plate.ready = true;
+    cam.capture = null;
+    cam.hasPrev = false;
+    cam.gain[0] = cam.gain[1] = cam.gain[2] = 1;
+    plateStatusIdle(cam);
+    updateStageState();
+  }
+
+  // 背景と判定された画素だけを使ってプレートに対する RGB ゲイン比を推定する。
+  // AE/AWB が微妙に動いても差分が破綻しないようにするための補正。
+  function updateGain(cam, cur){
+    const s = cam.settings;
+    if (!s.autoGain){ cam.gain[0] = cam.gain[1] = cam.gain[2] = 1; return; }
+    const n = cam.work.w * cam.work.h;
+    const mean = cam.plate.mean, prev = cam.buffers.prev;
+    let sc0 = 0, sc1 = 0, sc2 = 0, sp0 = 0, sp1 = 0, sp2 = 0, cnt = 0;
+    for (let i = 0; i < n; i += 4){
+      if (cam.hasPrev && prev[i] > 0.3) continue;
+      const i3 = i * 3, i4 = i * 4;
+      sc0 += cur[i4]; sc1 += cur[i4+1]; sc2 += cur[i4+2];
+      sp0 += mean[i3]; sp1 += mean[i3+1]; sp2 += mean[i3+2];
+      cnt++;
+    }
+    if (cnt < n * 0.005) return;
+    const upd = (idx, c, p) => {
+      let g = c / Math.max(p, 1);
+      if (g < 0.7) g = 0.7; else if (g > 1.4) g = 1.4;
+      cam.gain[idx] = cam.gain[idx] * 0.9 + g * 0.1;
+    };
+    upd(0, sc0, sp0); upd(1, sc1, sp1); upd(2, sc2, sp2);
+  }
+
+  // Horprasert 方式: 現フレーム色を背景色ベクトルへ射影し「明度歪み α」と「色歪み CD」に分解する。
+  //  - CD が小さく α<1  → 影（色味が同じで暗いだけ）→ 背景として無視
+  //  - CD が大きい      → 別の物体 → 前景
+  //  - 暗い服は α≈0.1 になるため明度項で確実に前景判定される
+  // しきい値はプレート記録時に測ったピクセル毎のノイズ σ を基準にする。
+  function diffMatte(cam, cur, out){
+    const n = cam.work.w * cam.work.h;
+    const mean = cam.plate.mean, sig = cam.plate.sigma;
+    const gr = cam.gain[0], gg = cam.gain[1], gb = cam.gain[2];
+    const kc = cam.settings.bgThresh;
+    const shadowTol = cam.settings.shadowTol / 100;
+    const K_BRI_UP = 0.12, K_BRI_DN = 0.18, SOFT = 0.8;
+
+    for (let i = 0; i < n; i++){
+      const i3 = i * 3, i4 = i * 4;
+      const br = mean[i3] * gr, bgn = mean[i3+1] * gg, bbl = mean[i3+2] * gb;
+      const r = cur[i4], g = cur[i4+1], b = cur[i4+2];
+      const denom = br*br + bgn*bgn + bbl*bbl;
+      const thr = kc * sig[i];
+      let score;
+
+      if (denom < 900){
+        // 背景がほぼ黒の領域は射影が不安定なので単純なユークリッド距離で判定する
+        const dr = r - br, dg = g - bgn, db = b - bbl;
+        score = Math.sqrt(dr*dr + dg*dg + db*db) / thr;
+      } else {
+        const al = (r*br + g*bgn + b*bbl) / denom;
+        const dr = r - al*br, dg = g - al*bgn, db = b - al*bbl;
+        const cd = Math.sqrt(dr*dr + dg*dg + db*db);
+        score = cd / thr;
+        const bri = al - 1;
+        const bScore = bri >= 0 ? bri / K_BRI_UP : (-bri - shadowTol) / K_BRI_DN;
+        if (bScore > score) score = bScore;
+      }
+
+      const v = (score - 1) / SOFT;
+      out[i] = v <= 0 ? 0 : (v >= 1 ? 1 : v);
+    }
+  }
+
+  // オープニング（収縮→膨張）で孤立した点ノイズを落とす。
+  // 結果は 0/1 のゲートとして元のマットに掛けるので、輪郭の階調は保たれる。
+  function denoiseMatte(cam, a, r){
+    const { w, h } = cam.work, n = w * h;
+    const { t1, t2, t3, acc } = cam.buffers;
+    boxBlur(a, t1, w, h, r, t2, acc);
+    for (let i = 0; i < n; i++) t3[i] = t1[i] >= 0.62 ? 1 : 0;
+    boxBlur(t3, t1, w, h, r, t2, acc);
+    for (let i = 0; i < n; i++) t3[i] = t1[i] > 0.18 ? 1 : 0;
+    boxBlur(t3, t1, w, h, 1, t2, acc);
+    for (let i = 0; i < n; i++) if (t1[i] < a[i]) a[i] = t1[i];
+  }
+
+  function readSeg(cam, maskImg){
+    const { w, h } = cam.work, n = w * h;
+    cam.segCtx.clearRect(0, 0, w, h);
+    cam.segCtx.drawImage(maskImg, 0, 0, w, h);
+    const d = cam.segCtx.getImageData(0, 0, w, h).data;
+    const seg = cam.buffers.seg;
+    for (let i = 0; i < n; i++) seg[i] = d[i*4+3] / 255;
+  }
+
+  // ---------- マット生成 ----------
+  function processFrame(cam, haveSeg){
+    const { w, h } = cam.work, n = w * h;
+    const s = cam.settings;
+    const { a, prev, seg, t1, t2, t3, acc } = cam.buffers;
+
+    const usePlate = cam.plate.ready && (s.matteMode === 'hybrid' || s.matteMode === 'diff');
+    const useSeg = haveSeg && (s.matteMode === 'hybrid' || s.matteMode === 'ai');
+
+    const cur = grabWork(cam);
+
+    if (usePlate){
+      updateGain(cam, cur);
+      diffMatte(cam, cur, a);
+      if (s.denoise > 0) denoiseMatte(cam, a, s.denoise);
+      // AI マスクを大きく膨張させた領域でゲートし、背景側の写り込みや動いた物を排除する。
+      // 輪郭そのものは差分マット（＝カメラ解像度由来）の鋭さを保つ。
+      if (useSeg && s.gate > 0){
+        const gr = Math.max(1, Math.round(w * s.gate / 100));
+        boxBlur(seg, t1, w, h, gr, t2, acc);
+        for (let i = 0; i < n; i++){
+          const v = (t1[i] - 0.02) / 0.10;
+          a[i] *= v <= 0 ? 0 : (v >= 1 ? 1 : v);
+        }
+      }
+    } else if (useSeg){
+      a.set(seg);
+    } else {
+      a.fill(1);
+    }
+
+    // ぼかし → 中心/傾きのリマップ（輪郭鋭さ・収縮）
+    if (s.feather > 0) boxBlur(a, t1, w, h, s.feather, t2, acc);
+    else t1.set(a);
+
+    const strength = 1 + s.edgeSharpness / 100;
+    const center = 0.5 + s.choke * 0.02;
+    for (let i = 0; i < n; i++){
+      a[i] = clamp01((t1[i] - center) * strength + 0.5);
+    }
+
+    // 適応型の時間平滑: 大きく変化した画素は追従を速くして残像を出さない
+    if (s.smoothing && cam.hasPrev){
+      for (let i = 0; i < n; i++){
+        const p = prev[i], v = a[i];
+        const k = Math.abs(v - p) > 0.35 ? 0.2 : 0.6;
+        const nv = p * k + v * (1 - k);
+        a[i] = nv; prev[i] = nv;
+      }
+    } else {
+      prev.set(a);
+      cam.hasPrev = true;
+    }
+
+    const d = cam.matteImage.data;
+    for (let i = 0; i < n; i++) d[i*4+3] = a[i] * 255;
+    cam.matteCtx.putImageData(cam.matteImage, 0, 0);
+  }
+
+  // マット（低解像度）と映像（フル解像度）を合成し、背景を白で埋める
+  function composite(cam){
+    const w = cam.maskCanvas.width, h = cam.maskCanvas.height;
+    const sw = cam.srcW, sh = cam.srcH;
+    if (!sw || !sh) return;
+    const { sx, sy, scw, sch } = coverRect(sw, sh, w, h);
+    const k = cam.work.w / sw;
+    const mctx = cam.maskCtx;
+
+    mctx.save();
+    mctx.clearRect(0, 0, w, h);
+    mctx.imageSmoothingEnabled = true;
+    mctx.imageSmoothingQuality = 'high';
+    mctx.globalCompositeOperation = 'source-over';
+    mctx.drawImage(cam.matteCanvas, sx*k, sy*k, scw*k, sch*k, 0, 0, w, h);
+    mctx.globalCompositeOperation = 'source-in';
+    mctx.drawImage(cam.videoEl, sx, sy, scw, sch, 0, 0, w, h);
+    mctx.globalCompositeOperation = 'destination-over';
+    mctx.fillStyle = '#ffffff';
+    mctx.fillRect(0, 0, w, h);
+    mctx.restore();
+
+    if (cam.settings.showMatte && cam.previewCtx){
+      const pc = cam.previewCanvas;
+      cam.previewCtx.fillStyle = '#000';
+      cam.previewCtx.fillRect(0, 0, pc.width, pc.height);
+      cam.previewCtx.drawImage(cam.matteCanvas, 0, 0, pc.width, pc.height);
+    }
+  }
+
   async function processLoop(cam){
     if (cam.stopped) return;
-    if (cam.videoEl.readyState >= 2){
-      if (cam.settings.bgRemoval){
+    if (cam.videoEl.readyState >= 2 && ensureWork(cam)){
+      if (cam.capture) capturePlateFrame(cam);
+      const s = cam.settings;
+      const wantAI = (s.matteMode === 'hybrid' || s.matteMode === 'ai');
+      if (wantAI && cam.segmenter){
+        // onSegResults 側で processFrame → composite まで行う
         try { await cam.segmenter.send({ image: cam.videoEl }); }
         catch(e){ /* フレーム欠損は無視 */ }
       } else {
-        drawRawFrame(cam);
+        processFrame(cam, false);
+        composite(cam);
       }
     }
     requestAnimationFrame(() => processLoop(cam));
   }
 
-  // 背景除去OFF時: セグメンテーションを行わず、映像フレームをそのままマスクキャンバスに描画する
-  function drawRawFrame(cam){
-    const w = cam.maskCanvas.width, h = cam.maskCanvas.height;
-    const sw = cam.videoEl.videoWidth, sh = cam.videoEl.videoHeight;
-    if (!sw || !sh) return;
-    const mctx = cam.maskCanvas.getContext('2d');
-    const { sx, sy, scw, sch } = coverRect(sw, sh, w, h);
-    mctx.clearRect(0, 0, w, h);
-    mctx.drawImage(cam.videoEl, sx, sy, scw, sch, 0, 0, w, h);
-  }
-
-  // 人物マスクの後処理: 輪郭のコントラストを強めて背景の写り込み（ハロー）を抑え、
-  // 直前フレームとブレンドしてちらつき（ノイズ）を軽減してから合成に使う。
-  function refineMask(cam, results){
-    const maskImg = results.segmentationMask;
-    const nw = maskImg.width, nh = maskImg.height;
-    const raw = cam.rawMaskCanvas;
-    if (raw.width !== nw || raw.height !== nh){
-      raw.width = nw; raw.height = nh; cam.prevAlpha = null;
-    }
-    const rctx = raw.getContext('2d');
-    rctx.clearRect(0, 0, nw, nh);
-    rctx.drawImage(maskImg, 0, 0, nw, nh);
-
-    const imgData = rctx.getImageData(0, 0, nw, nh);
-    const data = imgData.data;
-    const n = nw * nh;
-    const strength = 1 + (cam.settings.edgeSharpness / 100); // 0-200 -> 1.0-3.0
-    const doSmooth = cam.settings.smoothing;
-
-    if (doSmooth && (!cam.prevAlpha || cam.prevAlpha.length !== n)){
-      cam.prevAlpha = new Float32Array(n);
-      for (let i = 0; i < n; i++) cam.prevAlpha[i] = data[i * 4 + 3];
-    }
-
-    const smoothFactor = 0.55; // 直前フレームの寄与度
-    for (let i = 0; i < n; i++){
-      let a = data[i * 4 + 3];
-      if (doSmooth){
-        a = cam.prevAlpha[i] * smoothFactor + a * (1 - smoothFactor);
-        cam.prevAlpha[i] = a;
-      }
-      let v = (a / 255 - 0.5) * strength + 0.5;
-      v = v < 0 ? 0 : (v > 1 ? 1 : v);
-      data[i * 4 + 3] = v * 255;
-    }
-    rctx.putImageData(imgData, 0, 0);
-    return raw;
-  }
-
   function onSegResults(cam, results){
-    const refinedMask = refineMask(cam, results);
-    const w = cam.maskCanvas.width, h = cam.maskCanvas.height;
-    const mctx = cam.maskCanvas.getContext('2d');
-    const sw = results.image.width, sh = results.image.height;
-    const { sx, sy, scw, sch } = coverRect(sw, sh, w, h);
-
-    mctx.save();
-    mctx.clearRect(0,0,w,h);
-    mctx.globalCompositeOperation = 'source-over';
-    mctx.drawImage(refinedMask, sx, sy, scw, sch, 0, 0, w, h);
-    mctx.globalCompositeOperation = 'source-in';
-    mctx.drawImage(results.image, sx, sy, scw, sch, 0, 0, w, h);
-    mctx.globalCompositeOperation = 'destination-over';
-    mctx.fillStyle = '#ffffff';
-    mctx.fillRect(0,0,w,h);
-    mctx.restore();
+    if (cam.stopped || !cam.buffers) return;
+    try { readSeg(cam, results.segmentationMask); } catch(e){ return; }
+    processFrame(cam, true);
+    composite(cam);
   }
 
   // ---------- コントロール操作 ----------
@@ -541,12 +997,19 @@
     if (!cam) return;
     const t = e.target;
     const row = t.closest('.ctrl-row');
-    if (t.classList.contains('ctrl-contrast')){ cam.settings.contrast = +t.value; row.querySelector('.val').textContent = t.value+'%'; }
-    else if (t.classList.contains('ctrl-brightness')){ cam.settings.brightness = +t.value; row.querySelector('.val').textContent = t.value+'%'; }
-    else if (t.classList.contains('ctrl-scale')){ cam.settings.scale = +t.value; row.querySelector('.val').textContent = t.value+'%'; }
-    else if (t.classList.contains('ctrl-x')){ cam.settings.x = +t.value; row.querySelector('.val').textContent = t.value; }
-    else if (t.classList.contains('ctrl-y')){ cam.settings.y = +t.value; row.querySelector('.val').textContent = t.value; }
-    else if (t.classList.contains('ctrl-edge')){ cam.settings.edgeSharpness = +t.value; row.querySelector('.val').textContent = t.value; }
+    const setVal = txt => { if (row) row.querySelector('.val').textContent = txt; };
+    if (t.classList.contains('ctrl-contrast')){ cam.settings.contrast = +t.value; setVal(t.value+'%'); }
+    else if (t.classList.contains('ctrl-brightness')){ cam.settings.brightness = +t.value; setVal(t.value+'%'); }
+    else if (t.classList.contains('ctrl-scale')){ cam.settings.scale = +t.value; setVal(t.value+'%'); }
+    else if (t.classList.contains('ctrl-x')){ cam.settings.x = +t.value; setVal(t.value); }
+    else if (t.classList.contains('ctrl-y')){ cam.settings.y = +t.value; setVal(t.value); }
+    else if (t.classList.contains('ctrl-edge')){ cam.settings.edgeSharpness = +t.value; setVal(t.value); }
+    else if (t.classList.contains('ctrl-thresh')){ cam.settings.bgThresh = +t.value; setVal(t.value); }
+    else if (t.classList.contains('ctrl-shadow')){ cam.settings.shadowTol = +t.value; setVal(t.value+'%'); }
+    else if (t.classList.contains('ctrl-feather')){ cam.settings.feather = +t.value; setVal(t.value); }
+    else if (t.classList.contains('ctrl-choke')){ cam.settings.choke = +t.value; setVal(t.value); }
+    else if (t.classList.contains('ctrl-denoise')){ cam.settings.denoise = +t.value; setVal(t.value); }
+    else if (t.classList.contains('ctrl-gate')){ cam.settings.gate = +t.value; setVal(t.value+'%'); }
   });
 
   rack.addEventListener('change', (e) => {
@@ -556,24 +1019,44 @@
     if (!cam) return;
     const t = e.target;
     if (t.classList.contains('ctrl-enabled')){ cam.settings.enabled = t.checked; updateStageState(); }
-    else if (t.classList.contains('ctrl-bg')){ cam.settings.bgRemoval = t.checked; }
     else if (t.classList.contains('ctrl-invert')){ cam.settings.invert = t.checked; }
-    else if (t.classList.contains('ctrl-smooth')){ cam.settings.smoothing = t.checked; cam.prevAlpha = null; }
+    else if (t.classList.contains('ctrl-smooth')){ cam.settings.smoothing = t.checked; cam.hasPrev = false; }
+    else if (t.classList.contains('ctrl-autogain')){ cam.settings.autoGain = t.checked; }
+    else if (t.classList.contains('ctrl-showmatte')){
+      cam.settings.showMatte = t.checked;
+      chEl.querySelector('.ch-preview').classList.toggle('matte', t.checked);
+    }
+    else if (t.classList.contains('ctrl-mode')){
+      cam.settings.matteMode = t.value;
+      cam.hasPrev = false;
+      if ((t.value === 'hybrid' || t.value === 'diff') && !cam.plate.ready){
+        setChStatus(cam, t.value === 'diff'
+          ? '背景プレート未記録 — このモードでは除去されません。「背景を記録」を実行してください。'
+          : '背景プレート未記録 — AI のみで抽出中', 'warn');
+      } else plateStatusIdle(cam);
+    }
     else if (t.classList.contains('ctrl-model')){ cam.settings.modelQuality = t.value; reinitModel(cam); }
     else if (t.classList.contains('dev-select')){ switchDevice(cam, t.value); }
-    else if (t.classList.contains('ch-remove')){ /* handled below */ }
   });
 
   rack.addEventListener('click', (e) => {
-    if (e.target.classList.contains('ch-remove')){
-      const chEl = e.target.closest('.channel');
-      removeCamera(chEl.dataset.id);
-    }
+    const chEl = e.target.closest('.channel');
+    if (!chEl) return;
+    const cam = cams.find(c => c.id === chEl.dataset.id);
+    if (e.target.classList.contains('ch-remove')){ removeCamera(chEl.dataset.id); return; }
+    if (!cam) return;
+    if (e.target.classList.contains('ch-plate-btn')) startPlateCapture(cam, 3);
+    else if (e.target.classList.contains('ch-lock-btn')) lockCameraSettings(cam);
+  });
+
+  plateAllBtn.addEventListener('click', () => {
+    cams.forEach(c => { if (c.ready) startPlateCapture(c, 3); });
   });
 
   async function switchDevice(cam, deviceId){
     if (cam.stream) cam.stream.getTracks().forEach(t => t.stop());
     cam.ready = false;
+    invalidatePlate(cam);
     await startStream(cam, deviceId);
   }
 
@@ -582,7 +1065,11 @@
     if (idx === -1) return;
     const cam = cams[idx];
     cam.stopped = true;
+    if (cam.countdownTimer) clearTimeout(cam.countdownTimer);
     if (cam.stream) cam.stream.getTracks().forEach(t => t.stop());
+    if (cam.segmenter && typeof cam.segmenter.close === 'function'){
+      try { cam.segmenter.close(); } catch(e){ /* ignore */ }
+    }
     cam.el.remove();
     cams.splice(idx, 1);
     cams.forEach((c, i) => { c.el.querySelector('.ch-num').textContent = 'CH.' + String(i+1).padStart(2,'0'); });
@@ -625,17 +1112,6 @@
 
     requestAnimationFrame(renderMain);
   }
-
-  snapshotBtn.addEventListener('click', () => {
-    output.toBlob((blob) => {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `multiplex-${Date.now()}.png`;
-      a.click();
-      URL.revokeObjectURL(url);
-    }, 'image/png');
-  });
 
   addCamBtn.addEventListener('click', addCamera);
 
