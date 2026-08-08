@@ -328,10 +328,6 @@
         <div class="btn-row">
           <button class="btn half" id="revertBtn" disabled>プロシージャルに戻す</button>
         </div>
-        <div class="toggle-row">
-          <span>モデルを隠してリグのみ表示</span>
-          <label class="switch"><input type="checkbox" id="skeletonOnlyToggle" disabled><span class="slider"></span></label>
-        </div>
       </div>
 
       <div class="panel side-panel">
@@ -341,7 +337,11 @@
           <label class="switch"><input type="checkbox" id="mirrorToggle" checked><span class="slider"></span></label>
         </div>
         <div class="toggle-row">
-          <span>骨格オーバーレイ表示</span>
+          <span>骨格のみ表示（3Dビュー）</span>
+          <label class="switch"><input type="checkbox" id="skeletonOnlyToggle"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-row">
+          <span>カメラ映像に骨格を重ねる</span>
           <label class="switch"><input type="checkbox" id="skeletonToggle" checked><span class="slider"></span></label>
         </div>
         <div class="toggle-row">
@@ -416,7 +416,7 @@
     mirror: true,
     showSkeleton: true,
     mode: 'procedural', // 'procedural' (built-in hologram figure) | 'rigged' (loaded GLB/VRM skeleton)
-    modelSkeletonOnly: false, // when true (and mode==='rigged'): hide the loaded mesh, show only its bone rig
+    skeletonOnly: false, // hide the model/figure and show only the bones (works in either mode)
     bgMode: 'dark', // 'dark' | 'transparent' | 'blue' | 'green'
     cameraId: '', // '' = let the browser choose; otherwise a specific deviceId
     smooth: {},
@@ -437,9 +437,9 @@
     log(`背景を「${label}」に変更しました`);
   });
   $('skeletonOnlyToggle').addEventListener('change', e => {
-    state.modelSkeletonOnly = e.target.checked;
+    state.skeletonOnly = e.target.checked;
     applyModelDisplayMode();
-    log(state.modelSkeletonOnly ? '3Dモデルを非表示にし、リグ（骨格）のみを表示します' : '3Dモデルの表示に戻しました');
+    log(state.skeletonOnly ? '骨格のみを表示します' : '通常の表示に戻しました');
   });
 
   // ---------------------------------------------------------------------
@@ -694,6 +694,7 @@
     applyBackgroundMode();
 
     buildAvatar();
+    lastPoints = getDefaultPoints(); // so the skeleton view has something to draw before tracking starts
     setupCameraControls(renderer.domElement);
 
     window.addEventListener('resize', () => {
@@ -707,7 +708,7 @@
 
   function animate(){
     requestAnimationFrame(animate);
-    updateRiggedJointMarkers();
+    updateSkeletonView();
     renderer.render(scene, camera);
   }
 
@@ -737,8 +738,7 @@
   let riggedRoot = null, riggedBones = null, riggedRestDirs = null, riggedRestQuats = null, gltfLoader = null;
   let riggedPelvis = null, riggedChest = null, riggedHead = null; // orientation-driven
   // "リグのみ表示" 用: 読み込んだモデルの実メッシュ一覧、骨格ライン表示、関節マーカー
-  let riggedMeshes = [], riggedSkeletonHelper = null, riggedJointMarkers = null;
-  const _jointWP = new THREE.Vector3();
+  let riggedMeshes = [];
 
   function normName(name){ return (name || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
   function boneSide(name){
@@ -1182,11 +1182,8 @@
 
           riggedMeshes = [];
           riggedRoot.traverse(o => { if (o.isMesh) riggedMeshes.push(o); });
-          rebuildRigVisualization(bones);
 
           state.mode = 'rigged';
-          state.modelSkeletonOnly = false;
-          avatarRoot.visible = false;
           riggedRoot.visible = true;
           applyModelDisplayMode();
 
@@ -1218,61 +1215,126 @@
 
   // Rebuilds the bone-only visualization (line skeleton + glowing joint
   // markers) for the currently loaded riggedRoot. Called once per model load.
-  function rebuildRigVisualization(bones){
-    if (riggedSkeletonHelper){
-      scene.remove(riggedSkeletonHelper);
-      riggedSkeletonHelper.geometry.dispose();
-      riggedSkeletonHelper.material.dispose();
-      riggedSkeletonHelper = null;
-    }
-    if (riggedJointMarkers){
-      scene.remove(riggedJointMarkers);
-      disposeObject3D(riggedJointMarkers);
-      riggedJointMarkers = null;
-    }
+  // --- SKELETON-ONLY VIEW -------------------------------------------------
+  // Drawn as solid geometry (a cylinder per bone, a sphere per joint) rather
+  // than lines. THREE.SkeletonHelper, which this replaces, draws LineSegments —
+  // and WebGL ignores line width, so its bones always render one pixel wide
+  // whatever `material.linewidth` says. At the viewport's scale that was
+  // essentially invisible.
+  //
+  // Works with or without a loaded model: with one it draws that model's real
+  // bone hierarchy, without one it draws the tracked landmark skeleton. The
+  // meshes are pooled and reused, since the bone count differs between the two.
+  const SKEL_BONE_RADIUS = 0.016;
+  const SKEL_JOINT_RADIUS = 0.032;
+  // The tracked skeleton, as landmark-key pairs (no model needed).
+  const TRACK_BONES = [
+    ['lsh','lel'], ['lel','lwr'], ['rsh','rel'], ['rel','rwr'],
+    ['lsh','rsh'], ['lhip','rhip'], ['lsh','lhip'], ['rsh','rhip'],
+    ['lhip','lkn'], ['lkn','lan'], ['rhip','rkn'], ['rkn','ran'],
+    ['midHip','midSh'], ['midSh','nose'],
+  ];
+  let skeletonGroup = null;
+  const skelSegPool = [], skelJointPool = [];
+  const _skDir = new THREE.Vector3();
 
-    riggedSkeletonHelper = new THREE.SkeletonHelper(riggedRoot);
-    riggedSkeletonHelper.material.vertexColors = false;
-    riggedSkeletonHelper.material.color.set(ACCENT);
-    riggedSkeletonHelper.material.linewidth = 2;
-    riggedSkeletonHelper.visible = false;
-    scene.add(riggedSkeletonHelper);
-
-    riggedJointMarkers = new THREE.Group();
-    riggedJointMarkers.visible = false;
-    bones.forEach(b => {
-      const m = new THREE.Mesh(new THREE.IcosahedronGeometry(0.022, 0), makeJointMaterial());
-      m.userData.bone = b;
-      riggedJointMarkers.add(m);
+  function makeSkeletonMaterial(){
+    return new THREE.MeshStandardMaterial({
+      color: 0x0c1a14, roughness: 0.3, metalness: 0.1,
+      emissive: new THREE.Color(ACCENT).multiplyScalar(1.2),
+      flatShading: true,
     });
-    scene.add(riggedJointMarkers);
+  }
+  function ensureSkeletonGroup(){
+    if (skeletonGroup) return;
+    skeletonGroup = new THREE.Group();
+    skeletonGroup.visible = false;
+    scene.add(skeletonGroup);
+  }
+  function skelSegment(i){
+    if (!skelSegPool[i]){
+      const geo = new THREE.CylinderGeometry(SKEL_BONE_RADIUS, SKEL_BONE_RADIUS, 1, 6, 1);
+      geo.translate(0, -0.5, 0); // unit cylinder spans local Y in [-1, 0]
+      const pivot = new THREE.Group();
+      const mesh = new THREE.Mesh(geo, makeSkeletonMaterial());
+      pivot.add(mesh);
+      skeletonGroup.add(pivot);
+      skelSegPool[i] = { pivot, mesh };
+    }
+    return skelSegPool[i];
+  }
+  function skelJoint(i){
+    if (!skelJointPool[i]){
+      const m = new THREE.Mesh(new THREE.IcosahedronGeometry(SKEL_JOINT_RADIUS, 0), makeSkeletonMaterial());
+      skeletonGroup.add(m);
+      skelJointPool[i] = m;
+    }
+    return skelJointPool[i];
   }
 
-  // Reads each tracked bone's current world position and moves its marker
-  // sphere there. Runs every frame while the rig-only view is visible.
-  function updateRiggedJointMarkers(){
-    if (!riggedJointMarkers || !riggedJointMarkers.visible) return;
-    riggedJointMarkers.children.forEach(m => {
-      m.userData.bone.getWorldPosition(_jointWP);
-      m.position.copy(_jointWP);
+  function drawSkeleton(pairs, joints){
+    pairs.forEach(([a, b], i) => {
+      const s = skelSegment(i);
+      _skDir.subVectors(b, a);
+      const len = Math.max(_skDir.length(), 1e-4);
+      s.pivot.position.copy(a);
+      s.pivot.quaternion.setFromUnitVectors(UP_NEG, _skDir.normalize());
+      s.mesh.scale.set(1, len, 1);
+      s.pivot.visible = true;
     });
+    for (let i = pairs.length; i < skelSegPool.length; i++) skelSegPool[i].pivot.visible = false;
+    joints.forEach((p, i) => { const m = skelJoint(i); m.position.copy(p); m.visible = true; });
+    for (let i = joints.length; i < skelJointPool.length; i++) skelJointPool[i].visible = false;
+  }
+
+  // Every bone-to-bone link in the loaded model, in world space.
+  function riggedSkeletonData(){
+    const pairs = [], joints = [];
+    riggedRoot.traverse(o => {
+      if (!o.isBone) return;
+      const p = worldPos(o);
+      joints.push(p);
+      o.children.forEach(c => {
+        if (!c.isBone) return;
+        const cp = worldPos(c);
+        if (cp.distanceToSquared(p) > 1e-8) pairs.push([p, cp]);
+      });
+    });
+    return { pairs, joints };
+  }
+
+  // The landmark skeleton, for when no model is loaded.
+  function trackedSkeletonData(){
+    const P = lastPoints;
+    if (!P) return null;
+    const pairs = [];
+    TRACK_BONES.forEach(([a, b]) => { if (P[a] && P[b]) pairs.push([P[a], P[b]]); });
+    const joints = [];
+    for (const k in IDX) if (P[k]) joints.push(P[k]);
+    return { pairs, joints };
+  }
+
+  function updateSkeletonView(){
+    if (!skeletonGroup || !skeletonGroup.visible) return;
+    const data = (riggedRoot && state.mode === 'rigged') ? riggedSkeletonData() : trackedSkeletonData();
+    if (data) drawSkeleton(data.pairs, data.joints);
   }
 
   // Central switchboard for what's actually visible in the 3D viewport:
-  // - procedural mode: only the built-in hologram figure
-  // - rigged mode + mesh view: the loaded 3D model as-is
-  // - rigged mode + skeleton-only view: model mesh hidden, bones shown instead
+  // - skeleton-only: nothing but the bones, in either mode
+  // - rigged mode:   the loaded 3D model as-is
+  // - procedural:    the built-in hologram figure
   function applyModelDisplayMode(){
     const showingModel = !!riggedRoot && state.mode === 'rigged';
-    const skeletonOnly = showingModel && state.modelSkeletonOnly;
+    const skeletonOnly = state.skeletonOnly;
 
     riggedMeshes.forEach(m => { m.visible = showingModel && !skeletonOnly; });
-    if (riggedSkeletonHelper) riggedSkeletonHelper.visible = skeletonOnly;
-    if (riggedJointMarkers) riggedJointMarkers.visible = skeletonOnly;
+    avatarRoot.visible = !showingModel && !skeletonOnly;
+    ensureSkeletonGroup();
+    skeletonGroup.visible = skeletonOnly;
+    updateSkeletonView();
 
-    const toggle = $('skeletonOnlyToggle');
-    toggle.disabled = !showingModel;
-    toggle.checked = state.modelSkeletonOnly;
+    $('skeletonOnlyToggle').checked = skeletonOnly;
   }
 
   function flipModelFacing(){
@@ -1293,12 +1355,10 @@
     if (!riggedRoot) return;
     if (state.mode === 'rigged'){
       state.mode = 'procedural';
-      avatarRoot.visible = true;
       riggedRoot.visible = false;
       log('プロシージャル表示に戻しました');
     } else {
       state.mode = 'rigged';
-      avatarRoot.visible = false;
       riggedRoot.visible = true;
       log('モデル表示に切り替えました');
     }
@@ -1308,15 +1368,11 @@
 
   function removeModel(){
     if (riggedRoot){ scene.remove(riggedRoot); disposeObject3D(riggedRoot); riggedRoot = null; }
-    if (riggedSkeletonHelper){ scene.remove(riggedSkeletonHelper); riggedSkeletonHelper.geometry.dispose(); riggedSkeletonHelper.material.dispose(); riggedSkeletonHelper = null; }
-    if (riggedJointMarkers){ scene.remove(riggedJointMarkers); disposeObject3D(riggedJointMarkers); riggedJointMarkers = null; }
     riggedMeshes = [];
     riggedBones = null; riggedRestDirs = null; riggedRestQuats = null;
     riggedPelvis = null; riggedChest = null; riggedHead = null;
     resetPoseCalibration();
     state.mode = 'procedural';
-    state.modelSkeletonOnly = false;
-    avatarRoot.visible = true;
     $('modelStatus').textContent = '未読み込み（プロシージャル表示中）';
     $('boneChecklist').innerHTML = '';
     $('removeModelBtn').disabled = true;
@@ -1349,6 +1405,9 @@
     lkn: 'lhip', lan: 'lkn', rkn: 'rhip', ran: 'rkn',
   };
   let heldOffset = {}; // last confidently-seen child-minus-parent vector
+  // Most recent fully-corrected point set. The skeleton-only view reads it to
+  // draw the tracked skeleton when no model is loaded.
+  let lastPoints = null;
 
   function toWorld(lm){
     const mirrorSign = state.mirror ? -1 : 1;
@@ -1629,6 +1688,7 @@
       calibrateTorsoUpright(PD);
     }
     const PC = uprightCorrected(PD);
+    lastPoints = PC;
 
     if (state.mode === 'rigged' && riggedBones){
       // Pelvis and chest first (the limbs hang off them), then the limbs, then
