@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MULTIPLEX — 多重露光カメラミキサー</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#17140f;
+    --panel:#211c17;
+    --panel-2:#2a241d;
+    --line:#3d342a;
+    --text:#ece5d8;
+    --text-dim:#948a7c;
+    --accent:#c9491f;   /* セーフライト・レッド */
+    --accent-soft:#c9491f33;
+    --amber:#e0a83e;    /* 現像タイマーのアンバー */
+    --mono:'IBM Plex Mono', monospace;
+    --display:'Space Grotesk', sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--display);}
+  ::selection{background:var(--accent-soft);}
+  a{color:inherit;}
+
+  .app{display:flex;flex-direction:column;min-height:100vh;}
+
+  header{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:18px 28px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#1c1712,#17140f);
+    flex-wrap:wrap;gap:14px;
+  }
+  .brand{display:flex;align-items:baseline;gap:12px;}
+  .brand .mark{
+    width:12px;height:12px;border-radius:50%;
+    background:var(--accent);box-shadow:0 0 10px 2px var(--accent-soft);
+    display:inline-block;flex:none;
+  }
+  .brand h1{font-size:20px;letter-spacing:.14em;margin:0;font-weight:700;}
+  .brand .sub{font-family:var(--mono);font-size:11px;color:var(--text-dim);letter-spacing:.05em;}
+
+  .global-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  select, .btn{
+    font-family:var(--mono);font-size:12px;letter-spacing:.03em;
+    background:var(--panel-2);color:var(--text);border:1px solid var(--line);
+    padding:9px 14px;border-radius:3px;cursor:pointer;transition:.15s border-color,.15s background;
+  }
+  select:focus-visible,.btn:focus-visible,input:focus-visible{outline:2px solid var(--amber);outline-offset:1px;}
+  .btn:hover{border-color:var(--accent);}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#171310;font-weight:600;}
+  .btn.primary:hover{background:#e05a2a;}
+  .btn:disabled{opacity:.35;cursor:not-allowed;}
+  .btn:disabled:hover{border-color:var(--line);}
+
+  main{flex:1;display:flex;gap:0;min-height:0;}
+
+  .stage-col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:28px;position:relative;min-width:0;}
+  .stage{position:relative;max-width:100%;}
+  .stage canvas{
+    width:100%;height:auto;max-height:74vh;display:block;
+    background:#fff;border:1px solid var(--line);
+    box-shadow:0 30px 60px -20px rgba(0,0,0,.6);
+  }
+  .stage-note{
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    text-align:center;padding:20px;font-family:var(--mono);font-size:13px;color:var(--text-dim);
+    pointer-events:none;background:rgba(255,255,255,.72);
+  }
+  .stage-caption{margin-top:12px;font-family:var(--mono);font-size:11px;color:var(--text-dim);letter-spacing:.04em;}
+  .stage-caption b{color:var(--amber);font-weight:600;}
+
+  .rack{
+    width:340px;flex:none;border-left:1px solid var(--line);
+    background:var(--panel);overflow-y:auto;padding:16px;
+    display:flex;flex-direction:column;gap:14px;
+  }
+  .rack-empty{
+    font-family:var(--mono);font-size:12px;color:var(--text-dim);
+    border:1px dashed var(--line);border-radius:4px;padding:22px 14px;text-align:center;line-height:1.7;
+  }
+
+  .channel{
+    background:var(--panel-2);border:1px solid var(--line);border-radius:5px;overflow:hidden;
+  }
+  .channel-head{
+    display:flex;align-items:center;gap:8px;padding:9px 10px;
+    background:#1e1a15;border-bottom:1px solid var(--line);
+  }
+  .ch-num{font-family:var(--mono);font-size:11px;color:var(--amber);letter-spacing:.06em;flex:none;}
+  .dev-select{flex:1;padding:6px 8px;font-size:11px;min-width:0;}
+  .ch-remove{
+    flex:none;background:none;border:1px solid var(--line);color:var(--text-dim);
+    width:24px;height:24px;border-radius:3px;cursor:pointer;font-size:12px;line-height:1;
+  }
+  .ch-remove:hover{border-color:var(--accent);color:var(--accent);}
+
+  .ch-body{display:flex;gap:10px;padding:10px;}
+  .ch-preview{
+    flex:none;width:96px;height:72px;background:#000;border-radius:3px;overflow:hidden;
+    border:1px solid var(--line);position:relative;
+  }
+  .ch-preview video{width:100%;height:100%;object-fit:cover;display:block;}
+
+  .ch-controls{flex:1;display:flex;flex-direction:column;gap:7px;min-width:0;}
+  .ctrl-row{display:flex;align-items:center;gap:8px;}
+  .ctrl-row label{
+    font-family:var(--mono);font-size:10px;color:var(--text-dim);width:44px;flex:none;letter-spacing:.03em;
+  }
+  .ctrl-row input[type=range]{
+    flex:1;accent-color:var(--accent);height:14px;
+  }
+  .ctrl-row .val{font-family:var(--mono);font-size:10px;color:var(--text-dim);width:34px;text-align:right;flex:none;}
+  .ctrl-toggles{display:flex;gap:10px 14px;margin-top:2px;flex-wrap:wrap;}
+  .ctrl-toggles label{
+    display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;color:var(--text-dim);cursor:pointer;
+  }
+  .ctrl-toggles input{accent-color:var(--accent);}
+
+  footer{
+    padding:10px 28px;border-top:1px solid var(--line);
+    font-family:var(--mono);font-size:10px;color:var(--text-dim);letter-spacing:.03em;
+  }
+
+  @media (max-width:860px){
+    main{flex-direction:column;}
+    .rack{width:100%;border-left:none;border-top:1px solid var(--line);flex-direction:row;flex-wrap:wrap;max-height:44vh;}
+    .channel{width:100%;}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div class="brand">
+      <span class="mark"></span>
+      <div>
+        <h1>MULTIPLEX</h1>
+        <div class="sub">多重露光カメラミキサー — 人物モノクロ乗算合成</div>
+      </div>
+    </div>
+    <div class="global-controls">
+      <label style="font-family:var(--mono);font-size:11px;color:var(--text-dim);">出力
+        <select id="outSize">
+          <option value="1280x720" selected>1280×720</option>
+          <option value="1920x1080">1920×1080</option>
+          <option value="960x540">960×540</option>
+        </select>
+      </label>
+      <button class="btn" id="refreshBtn" title="接続中のカメラを再検出します">⟳ デバイス再検出</button>
+      <button class="btn" id="snapshotBtn">静止画を保存</button>
+      <button class="btn primary" id="addCamBtn">＋ カメラを追加</button>
+    </div>
+  </header>
+  <div id="deviceStatus" style="padding:6px 28px 0;font-family:'IBM Plex Mono',monospace;font-size:11px;color:#948a7c;"></div>
+
+  <main>
+    <div class="stage-col">
+      <div class="stage">
+        <canvas id="output" width="1280" height="720"></canvas>
+        <div class="stage-note" id="stageNote">右側の「カメラを追加」から映像を追加してください。<br>各映像は背景が除去され、人物のモノクロ画像として乗算合成されます。</div>
+      </div>
+      <div class="stage-caption" id="stageCaption"></div>
+      <div class="stage-caption" style="margin-top:2px;">Tip: 無地の背景・被写体への均一な照明・カメラから1〜2m以内の距離だと抽出精度が上がります。各CHの「抽出精度」を高精度、「輪郭鋭さ」を高めにすると背景の写り込みが減ります。</div>
+    </div>
+
+    <div class="rack" id="rack">
+      <div class="rack-empty" id="rackEmpty">CH がありません。<br>「＋ カメラを追加」でカメラを割り当ててください（最大4台）。</div>
+    </div>
+  </main>
+
+  <footer>
+    人物抽出には MediaPipe Selfie Segmentation を使用（初回読み込みにインターネット接続が必要）。カメラはブラウザの権限許可が必要です。file:// で開いてカメラが起動しない場合は、ローカルサーバー経由（例: <code>python3 -m http.server</code>）で開いてください。<br>
+    外付けUSBカメラが選択肢に出ない場合: ①OSのカメラ権限（Windows「カメラのプライバシー設定」/ macOS「システム設定 > プライバシーとセキュリティ > カメラ」）でブラウザが許可されているか確認 ②他のアプリ（Zoom・Teams・OBS等）がそのカメラを使用中でないか確認 ③USB接続後に「⟳ デバイス再検出」を押す ④それでも出ない場合はブラウザを再起動。
+  </footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js" crossorigin="anonymous"></script>
+<script>
+(() => {
+  const MAX_CAMS = 4;
+  const output = document.getElementById('output');
+  const outputCtx = output.getContext('2d');
+  const rack = document.getElementById('rack');
+  const rackEmpty = document.getElementById('rackEmpty');
+  const stageNote = document.getElementById('stageNote');
+  const stageCaption = document.getElementById('stageCaption');
+  const addCamBtn = document.getElementById('addCamBtn');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const snapshotBtn = document.getElementById('snapshotBtn');
+  const outSizeSel = document.getElementById('outSize');
+  const deviceStatus = document.getElementById('deviceStatus');
+
+  let OUT_W = 1280, OUT_H = 720;
+  let cams = [];      // {id, deviceId, stream, videoEl, segmenter, maskCanvas, layerCanvas, settings, stopped, el}
+  let camCounter = 0;
+  let deviceCache = [];
+  let lastPermissionError = null;
+
+  // ---------- ユーティリティ ----------
+  function coverRect(sw, sh, dw, dh){
+    const srcR = sw / sh, dstR = dw / dh;
+    let scw, sch, sx, sy;
+    if (srcR > dstR){ sch = sh; scw = sh * dstR; sy = 0; sx = (sw - scw) / 2; }
+    else { scw = sw; sch = sw / dstR; sx = 0; sy = (sh - sch) / 2; }
+    return { sx, sy, scw, sch };
+  }
+
+  function updateStageState(){
+    const active = cams.some(c => c.ready);
+    stageNote.style.display = active ? 'none' : 'flex';
+    addCamBtn.disabled = cams.length >= MAX_CAMS;
+    rackEmpty.style.display = cams.length ? 'none' : 'block';
+    stageCaption.innerHTML = cams.length
+      ? `合成中の CH: <b>${cams.filter(c=>c.settings.enabled).length}</b> / ${cams.length}`
+      : '';
+  }
+
+  function resizeOutput(w, h){
+    OUT_W = w; OUT_H = h;
+    output.width = w; output.height = h;
+    cams.forEach(c => {
+      c.maskCanvas.width = w; c.maskCanvas.height = h;
+      c.layerCanvas.width = w; c.layerCanvas.height = h;
+    });
+  }
+  outSizeSel.addEventListener('change', () => {
+    const [w,h] = outSizeSel.value.split('x').map(Number);
+    resizeOutput(w,h);
+  });
+
+  // ---------- デバイス列挙 ----------
+  // ブラウザによっては「カメラ許可」がデバイス単位で記憶されるため、ラベル付きのデバイスが
+  // 1つでもあっても他のカメラが未許可のことがある。そのため毎回、明示的に許可を要求してから
+  // enumerateDevices() する。失敗しても列挙自体は試みる。
+  async function requestCameraPermission(){
+    try {
+      const tmp = await navigator.mediaDevices.getUserMedia({ video: true });
+      tmp.getTracks().forEach(t => t.stop());
+      lastPermissionError = null;
+      return true;
+    } catch(e){
+      lastPermissionError = e;
+      return false;
+    }
+  }
+
+  async function listVideoDevices({forcePermission = false, allowPrompt = true} = {}){
+    let devices = await navigator.mediaDevices.enumerateDevices();
+    let videoInputs = devices.filter(d => d.kind === 'videoinput' && d.deviceId);
+    const noLabels = videoInputs.length === 0 || videoInputs.every(d => !d.label);
+    if (allowPrompt && (forcePermission || noLabels)){
+      await requestCameraPermission();
+      devices = await navigator.mediaDevices.enumerateDevices();
+      videoInputs = devices.filter(d => d.kind === 'videoinput' && d.deviceId);
+    }
+    return videoInputs;
+  }
+
+  async function refreshDevices({forcePermission = false, silent = false, allowPrompt = true} = {}){
+    try {
+      deviceCache = await listVideoDevices({ forcePermission, allowPrompt });
+    } catch(e){
+      if (!silent) alert('カメラ一覧の取得に失敗しました: ' + e.message);
+      return deviceCache;
+    }
+    updateDeviceStatus();
+    updateAllChannelSelects();
+    return deviceCache;
+  }
+
+  function updateDeviceStatus(){
+    if (!deviceCache.length){
+      deviceStatus.textContent = '検出済みカメラ: 0台 — 「⟳ デバイス再検出」を押すか、OS側のカメラ権限（プライバシー設定）を確認してください。';
+      return;
+    }
+    const names = deviceCache.map(d => d.label || '(ラベル非公開のカメラ)').join(' / ');
+    deviceStatus.textContent = `検出済みカメラ: ${deviceCache.length}台 — ${names}`;
+  }
+
+  function updateAllChannelSelects(){
+    cams.forEach(cam => {
+      const sel = cam.el.querySelector('.dev-select');
+      const current = cam.deviceId;
+      const optionsHtml = deviceCache.map(d =>
+        `<option value="${d.deviceId}" ${d.deviceId===current?'selected':''}>${d.label || 'カメラ'}</option>`
+      ).join('');
+      sel.innerHTML = optionsHtml || '<option value="">（カメラなし）</option>';
+    });
+  }
+
+  // 接続機器の変化（USBカメラの抜き差し等）を検知して自動で再検出する（許可ダイアログは出さない）
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener){
+    navigator.mediaDevices.addEventListener('devicechange', () => refreshDevices({ silent:true, allowPrompt:false }));
+  }
+
+  refreshBtn.addEventListener('click', () => refreshDevices({ forcePermission:true }));
+
+  function buildNoDeviceMessage(){
+    const isFramed = (window.self !== window.top);
+    const lines = ['利用可能なカメラが見つかりませんでした。'];
+
+    if (isFramed){
+      lines.push('');
+      lines.push('■ このページがチャット画面に埋め込まれたプレビューで開かれている可能性があります。');
+      lines.push('埋め込みプレビュー（iframe）内ではブラウザのセキュリティ制限でカメラ許可自体がブロックされ、OS側で許可しても届かないことがあります。');
+      lines.push('→ このHTMLファイルをダウンロードし、ブラウザで直接開いて（ダブルクリック、または「ファイルを開く」）お試しください。');
+    }
+
+    if (lastPermissionError){
+      lines.push('');
+      lines.push(`■ 詳細エラー: ${lastPermissionError.name || ''} ${lastPermissionError.message || ''}`);
+      const map = {
+        NotAllowedError: 'このサイト/ページに対するカメラ許可が「ブロック」で確定しています。アドレスバー左のカメラ/鍵アイコンからサイトの権限を「許可」にリセットし、ページを再読み込みしてください。',
+        NotFoundError: 'OSがこのブラウザにカメラを1台も見せていません。他のアプリでカメラが正しく認識されているか、OSのカメラ設定を確認してください。',
+        NotReadableError: 'カメラが他のアプリ（Zoom・Teams・OBS等）に使用中で掴めない状態です。他のアプリを閉じてから再度お試しください。',
+        OverconstrainedError: '要求した条件に合うカメラがありません。',
+        SecurityError: 'セキュアでないページ（httpやfile://の一部のブラウザ）ではカメラを使用できません。'
+      };
+      if (map[lastPermissionError.name]) lines.push(map[lastPermissionError.name]);
+    } else {
+      lines.push('');
+      lines.push('■ OS側のカメラ権限（Windowsの「カメラのプライバシー設定」/ macOSの「システム設定 > プライバシーとセキュリティ > カメラ」）でこのブラウザが許可されているか確認してください。');
+    }
+
+    lines.push('');
+    lines.push('確認後、「⟳ デバイス再検出」を押してください。');
+    return lines.join('\n');
+  }
+
+
+  async function addCamera(){
+    if (cams.length >= MAX_CAMS) return;
+    addCamBtn.disabled = true;
+
+    await refreshDevices({ forcePermission: deviceCache.length === 0 });
+    const devices = deviceCache;
+
+    if (!devices.length){
+      alert(buildNoDeviceMessage());
+      addCamBtn.disabled = false;
+      return;
+    }
+
+    const usedIds = cams.map(c => c.deviceId);
+    const defaultDevice = devices.find(d => !usedIds.includes(d.deviceId)) || devices[0];
+
+    const id = 'cam' + (++camCounter);
+    const cam = {
+      id, deviceId: null, stream: null, videoEl: null, segmenter: null,
+      maskCanvas: document.createElement('canvas'),
+      layerCanvas: document.createElement('canvas'),
+      rawMaskCanvas: document.createElement('canvas'),
+      prevAlpha: null, loopStarted: false,
+      settings: { contrast:120, brightness:100, scale:100, x:0, y:0, invert:false, enabled:true,
+                  edgeSharpness:150, smoothing:true, modelQuality:'0', bgRemoval:true },
+      stopped: false, ready: false, el: null
+    };
+    cam.maskCanvas.width = OUT_W; cam.maskCanvas.height = OUT_H;
+    cam.layerCanvas.width = OUT_W; cam.layerCanvas.height = OUT_H;
+
+    const el = buildChannelDOM(cam, devices, defaultDevice.deviceId);
+    cam.el = el;
+    rack.appendChild(el);
+    cams.push(cam);
+    updateStageState();
+
+    await startStream(cam, defaultDevice.deviceId);
+    addCamBtn.disabled = cams.length >= MAX_CAMS;
+  }
+
+  function buildChannelDOM(cam, devices, selectedDeviceId){
+    const wrap = document.createElement('div');
+    wrap.className = 'channel';
+    wrap.dataset.id = cam.id;
+
+    const options = devices.map(d =>
+      `<option value="${d.deviceId}" ${d.deviceId===selectedDeviceId?'selected':''}>${d.label || 'カメラ'}</option>`
+    ).join('');
+
+    wrap.innerHTML = `
+      <div class="channel-head">
+        <span class="ch-num">CH.${String(cams.length+1).padStart(2,'0')}</span>
+        <select class="dev-select">${options}</select>
+        <button class="ch-remove" title="このCHを削除">✕</button>
+      </div>
+      <div class="ch-body">
+        <div class="ch-preview"><video autoplay playsinline muted></video></div>
+        <div class="ch-controls">
+          <div class="ctrl-row"><label>抽出精度</label>
+            <select class="ctrl-model" style="flex:1;font-size:10px;padding:4px 6px;">
+              <option value="0" selected>高精度（近距離向け）</option>
+              <option value="1">高速（広角向け）</option>
+            </select>
+          </div>
+          <div class="ctrl-row"><label>輪郭鋭さ</label><input type="range" class="ctrl-edge" min="0" max="200" value="150"><span class="val">150</span></div>
+          <div class="ctrl-row"><label>コントラ</label><input type="range" class="ctrl-contrast" min="50" max="300" value="120"><span class="val">120%</span></div>
+          <div class="ctrl-row"><label>明るさ</label><input type="range" class="ctrl-brightness" min="50" max="200" value="100"><span class="val">100%</span></div>
+          <div class="ctrl-row"><label>サイズ</label><input type="range" class="ctrl-scale" min="20" max="200" value="100"><span class="val">100%</span></div>
+          <div class="ctrl-row"><label>X位置</label><input type="range" class="ctrl-x" min="-100" max="100" value="0"><span class="val">0</span></div>
+          <div class="ctrl-row"><label>Y位置</label><input type="range" class="ctrl-y" min="-100" max="100" value="0"><span class="val">0</span></div>
+          <div class="ctrl-toggles">
+            <label><input type="checkbox" class="ctrl-enabled" checked>合成に使用</label>
+            <label><input type="checkbox" class="ctrl-bg" checked>背景除去</label>
+            <label><input type="checkbox" class="ctrl-invert">階調反転</label>
+            <label><input type="checkbox" class="ctrl-smooth" checked>ちらつき軽減</label>
+          </div>
+        </div>
+      </div>
+    `;
+    cam.videoEl = wrap.querySelector('video');
+    return wrap;
+  }
+
+  async function startStream(cam, deviceId){
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: deviceId } }, audio: false
+      });
+      cam.stream = stream;
+      cam.deviceId = deviceId;
+      cam.videoEl.srcObject = stream;
+      await cam.videoEl.play().catch(()=>{});
+      createSegmenter(cam);
+      if (!cam.loopStarted){ cam.loopStarted = true; processLoop(cam); }
+      cam.ready = true;
+      updateStageState();
+    } catch(e){
+      alert('カメラの起動に失敗しました: ' + e.message);
+    }
+  }
+
+  function createSegmenter(cam){
+    const seg = new SelfieSegmentation({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}`
+    });
+    seg.setOptions({ modelSelection: parseInt(cam.settings.modelQuality, 10) || 0 });
+    seg.onResults((results) => onSegResults(cam, results));
+    cam.segmenter = seg;
+    cam.prevAlpha = null; // モデル切替時は平滑化バッファをリセット
+  }
+
+  function reinitModel(cam){
+    const old = cam.segmenter;
+    createSegmenter(cam);
+    if (old && typeof old.close === 'function'){
+      try { old.close(); } catch(e){ /* ignore */ }
+    }
+  }
+
+  async function processLoop(cam){
+    if (cam.stopped) return;
+    if (cam.videoEl.readyState >= 2){
+      if (cam.settings.bgRemoval){
+        try { await cam.segmenter.send({ image: cam.videoEl }); }
+        catch(e){ /* フレーム欠損は無視 */ }
+      } else {
+        drawRawFrame(cam);
+      }
+    }
+    requestAnimationFrame(() => processLoop(cam));
+  }
+
+  // 背景除去OFF時: セグメンテーションを行わず、映像フレームをそのままマスクキャンバスに描画する
+  function drawRawFrame(cam){
+    const w = cam.maskCanvas.width, h = cam.maskCanvas.height;
+    const sw = cam.videoEl.videoWidth, sh = cam.videoEl.videoHeight;
+    if (!sw || !sh) return;
+    const mctx = cam.maskCanvas.getContext('2d');
+    const { sx, sy, scw, sch } = coverRect(sw, sh, w, h);
+    mctx.clearRect(0, 0, w, h);
+    mctx.drawImage(cam.videoEl, sx, sy, scw, sch, 0, 0, w, h);
+  }
+
+  // 人物マスクの後処理: 輪郭のコントラストを強めて背景の写り込み（ハロー）を抑え、
+  // 直前フレームとブレンドしてちらつき（ノイズ）を軽減してから合成に使う。
+  function refineMask(cam, results){
+    const maskImg = results.segmentationMask;
+    const nw = maskImg.width, nh = maskImg.height;
+    const raw = cam.rawMaskCanvas;
+    if (raw.width !== nw || raw.height !== nh){
+      raw.width = nw; raw.height = nh; cam.prevAlpha = null;
+    }
+    const rctx = raw.getContext('2d');
+    rctx.clearRect(0, 0, nw, nh);
+    rctx.drawImage(maskImg, 0, 0, nw, nh);
+
+    const imgData = rctx.getImageData(0, 0, nw, nh);
+    const data = imgData.data;
+    const n = nw * nh;
+    const strength = 1 + (cam.settings.edgeSharpness / 100); // 0-200 -> 1.0-3.0
+    const doSmooth = cam.settings.smoothing;
+
+    if (doSmooth && (!cam.prevAlpha || cam.prevAlpha.length !== n)){
+      cam.prevAlpha = new Float32Array(n);
+      for (let i = 0; i < n; i++) cam.prevAlpha[i] = data[i * 4 + 3];
+    }
+
+    const smoothFactor = 0.55; // 直前フレームの寄与度
+    for (let i = 0; i < n; i++){
+      let a = data[i * 4 + 3];
+      if (doSmooth){
+        a = cam.prevAlpha[i] * smoothFactor + a * (1 - smoothFactor);
+        cam.prevAlpha[i] = a;
+      }
+      let v = (a / 255 - 0.5) * strength + 0.5;
+      v = v < 0 ? 0 : (v > 1 ? 1 : v);
+      data[i * 4 + 3] = v * 255;
+    }
+    rctx.putImageData(imgData, 0, 0);
+    return raw;
+  }
+
+  function onSegResults(cam, results){
+    const refinedMask = refineMask(cam, results);
+    const w = cam.maskCanvas.width, h = cam.maskCanvas.height;
+    const mctx = cam.maskCanvas.getContext('2d');
+    const sw = results.image.width, sh = results.image.height;
+    const { sx, sy, scw, sch } = coverRect(sw, sh, w, h);
+
+    mctx.save();
+    mctx.clearRect(0,0,w,h);
+    mctx.globalCompositeOperation = 'source-over';
+    mctx.drawImage(refinedMask, sx, sy, scw, sch, 0, 0, w, h);
+    mctx.globalCompositeOperation = 'source-in';
+    mctx.drawImage(results.image, sx, sy, scw, sch, 0, 0, w, h);
+    mctx.globalCompositeOperation = 'destination-over';
+    mctx.fillStyle = '#ffffff';
+    mctx.fillRect(0,0,w,h);
+    mctx.restore();
+  }
+
+  // ---------- コントロール操作 ----------
+  rack.addEventListener('input', (e) => {
+    const chEl = e.target.closest('.channel');
+    if (!chEl) return;
+    const cam = cams.find(c => c.id === chEl.dataset.id);
+    if (!cam) return;
+    const t = e.target;
+    const row = t.closest('.ctrl-row');
+    if (t.classList.contains('ctrl-contrast')){ cam.settings.contrast = +t.value; row.querySelector('.val').textContent = t.value+'%'; }
+    else if (t.classList.contains('ctrl-brightness')){ cam.settings.brightness = +t.value; row.querySelector('.val').textContent = t.value+'%'; }
+    else if (t.classList.contains('ctrl-scale')){ cam.settings.scale = +t.value; row.querySelector('.val').textContent = t.value+'%'; }
+    else if (t.classList.contains('ctrl-x')){ cam.settings.x = +t.value; row.querySelector('.val').textContent = t.value; }
+    else if (t.classList.contains('ctrl-y')){ cam.settings.y = +t.value; row.querySelector('.val').textContent = t.value; }
+    else if (t.classList.contains('ctrl-edge')){ cam.settings.edgeSharpness = +t.value; row.querySelector('.val').textContent = t.value; }
+  });
+
+  rack.addEventListener('change', (e) => {
+    const chEl = e.target.closest('.channel');
+    if (!chEl) return;
+    const cam = cams.find(c => c.id === chEl.dataset.id);
+    if (!cam) return;
+    const t = e.target;
+    if (t.classList.contains('ctrl-enabled')){ cam.settings.enabled = t.checked; updateStageState(); }
+    else if (t.classList.contains('ctrl-bg')){ cam.settings.bgRemoval = t.checked; }
+    else if (t.classList.contains('ctrl-invert')){ cam.settings.invert = t.checked; }
+    else if (t.classList.contains('ctrl-smooth')){ cam.settings.smoothing = t.checked; cam.prevAlpha = null; }
+    else if (t.classList.contains('ctrl-model')){ cam.settings.modelQuality = t.value; reinitModel(cam); }
+    else if (t.classList.contains('dev-select')){ switchDevice(cam, t.value); }
+    else if (t.classList.contains('ch-remove')){ /* handled below */ }
+  });
+
+  rack.addEventListener('click', (e) => {
+    if (e.target.classList.contains('ch-remove')){
+      const chEl = e.target.closest('.channel');
+      removeCamera(chEl.dataset.id);
+    }
+  });
+
+  async function switchDevice(cam, deviceId){
+    if (cam.stream) cam.stream.getTracks().forEach(t => t.stop());
+    cam.ready = false;
+    await startStream(cam, deviceId);
+  }
+
+  function removeCamera(id){
+    const idx = cams.findIndex(c => c.id === id);
+    if (idx === -1) return;
+    const cam = cams[idx];
+    cam.stopped = true;
+    if (cam.stream) cam.stream.getTracks().forEach(t => t.stop());
+    cam.el.remove();
+    cams.splice(idx, 1);
+    cams.forEach((c, i) => { c.el.querySelector('.ch-num').textContent = 'CH.' + String(i+1).padStart(2,'0'); });
+    updateStageState();
+  }
+
+  // ---------- メイン合成ループ ----------
+  function renderMain(){
+    outputCtx.globalCompositeOperation = 'source-over';
+    outputCtx.fillStyle = '#ffffff';
+    outputCtx.fillRect(0, 0, OUT_W, OUT_H);
+
+    cams.forEach(cam => {
+      if (!cam.ready || !cam.settings.enabled) return;
+      const lctx = cam.layerCanvas.getContext('2d');
+      lctx.save();
+      lctx.clearRect(0, 0, OUT_W, OUT_H);
+      lctx.fillStyle = '#ffffff';
+      lctx.fillRect(0, 0, OUT_W, OUT_H);
+
+      const s = cam.settings;
+      const filters = [
+        'grayscale(1)',
+        `contrast(${s.contrast}%)`,
+        `brightness(${s.brightness}%)`,
+        s.invert ? 'invert(1)' : ''
+      ].filter(Boolean).join(' ');
+      lctx.filter = filters;
+
+      const scale = s.scale / 100;
+      const dw = OUT_W * scale, dh = OUT_H * scale;
+      const dx = (OUT_W - dw) / 2 + (s.x / 100) * (OUT_W * 0.5);
+      const dy = (OUT_H - dh) / 2 + (s.y / 100) * (OUT_H * 0.5);
+      lctx.drawImage(cam.maskCanvas, dx, dy, dw, dh);
+      lctx.restore();
+
+      outputCtx.globalCompositeOperation = 'multiply';
+      outputCtx.drawImage(cam.layerCanvas, 0, 0);
+    });
+
+    requestAnimationFrame(renderMain);
+  }
+
+  snapshotBtn.addEventListener('click', () => {
+    output.toBlob((blob) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `multiplex-${Date.now()}.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }, 'image/png');
+  });
+
+  addCamBtn.addEventListener('click', addCamera);
+
+  updateStageState();
+  refreshDevices({ silent:true, allowPrompt:false }); // 初期表示のみ。許可ダイアログはユーザー操作時にだけ出す
+  renderMain();
+})();
+</script>
+</body>
+</html>
