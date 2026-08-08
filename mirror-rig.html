@@ -999,6 +999,7 @@
     uprightQ = null; torsoUprightLocal = null;
     state.smooth = {};
     heldOffset = {};
+    axisLength.shoulder = axisLength.hip = 0;
     calibSettle = CALIB_SETTLE_FRAMES;
     if (reason) log(reason);
   }
@@ -1360,6 +1361,76 @@
     return prev;
   }
 
+  // --- DEPTH RECONSTRUCTION (body yaw accuracy) ---------------------------
+  // Turning left/right is a rotation about the vertical axis, so the ONLY thing
+  // that carries it is the depth component of the shoulder and hip lines. That
+  // is the single least reliable number MediaPipe produces: x and y are learned
+  // directly from pixels, but z is inferred from a single camera and comes back
+  // noticeably compressed. A real 30° turn typically reads as barely half that.
+  //
+  // The shoulder line doesn't change length when someone turns, though, so the
+  // depth can be recovered geometrically instead of trusted:
+  //     L = shoulder length, measured once facing the camera
+  //     p = how wide the shoulders still look on screen  (the x/y part — pixels)
+  //     |depth| = √(L² − p²)
+  // Only the SIGN of the measured z is kept, to tell which way they turned.
+  // p is grounded in the image, so this is immune to the depth compression.
+  //
+  // Note this is a no-op when MediaPipe's depth happens to be accurate: then
+  // p and z are already consistent with L and √(L² − p²) simply returns |z|.
+  // Near the frontal pose the reconstruction is ill-conditioned: p sits close to
+  // L, and √(L²−p²) has an infinite slope there, so a 1–2% wobble in the
+  // measured width would swing the recovered angle by ~10° while the person is
+  // standing still. Fade the correction out as the shoulders approach their
+  // full on-screen width — a near-frontal body has almost no yaw to recover
+  // anyway, so there the raw depth is simply left to speak for itself.
+  // Raise DEPTH_FADE_HI toward 1 for more sensitivity to small turns; lower it
+  // if the figure twitches at rest.
+  const DEPTH_FADE_HI = 0.99; // p/L at or above which the correction is off
+  const DEPTH_FADE_LO = 0.93; // p/L at or below which it is applied in full
+  const axisLength = { shoulder: 0, hip: 0 };
+  function calibrateAxisLengths(P){
+    // Measured from the on-screen width, not the 3D distance: the calibration
+    // pose is "facing the camera", where the full width is visible, and folding
+    // the untrusted z into the reference would defeat the whole point.
+    axisLength.shoulder = Math.hypot(P.lsh.x - P.rsh.x, P.lsh.y - P.rsh.y);
+    axisLength.hip = Math.hypot(P.lhip.x - P.rhip.x, P.lhip.y - P.rhip.y);
+  }
+
+  // Moves the pair apart in depth only, keeping their midpoint exactly where it
+  // was so nothing else about the pose shifts.
+  //
+  // The limbs hanging off each joint travel with it. Moving a hip in depth
+  // while leaving its knee behind would invent a forward tilt in the thigh that
+  // the person never had — the raw landmarks are at least self-consistent, and
+  // correcting one end of a segment without the other destroys that.
+  function rebuildPairDepth(out, leftKeys, rightKeys, restLength){
+    if (!(restLength > 1e-6)) return;
+    const a = out[leftKeys[0]], b = out[rightKeys[0]];
+    if (!a || !b) return;
+    const planar = Math.hypot(a.x - b.x, a.y - b.y);
+    if (planar >= restLength) return; // wider than calibrated — nothing to recover
+    const ratio = planar / restLength;
+    const weight = Math.min(1, Math.max(0, (DEPTH_FADE_HI - ratio) / (DEPTH_FADE_HI - DEPTH_FADE_LO)));
+    if (weight <= 0) return;
+    const dz = a.z - b.z;
+    const depth = Math.sqrt(restLength * restLength - planar * planar);
+    const shift = ((dz < 0 ? -depth : depth) - dz) * 0.5 * weight;
+    leftKeys.forEach(k => { if (out[k]) out[k].z += shift; });
+    rightKeys.forEach(k => { if (out[k]) out[k].z -= shift; });
+  }
+
+  // Must run on the RAW points: it assumes x/y is the image plane and z is the
+  // camera's depth axis, which stops being true once the upright correction
+  // rotates everything.
+  function depthCorrected(P){
+    const out = {};
+    for (const k in P) out[k] = P[k].clone();
+    rebuildPairDepth(out, ['lsh', 'lel', 'lwr'], ['rsh', 'rel', 'rwr'], axisLength.shoulder);
+    rebuildPairDepth(out, ['lhip', 'lkn', 'lan'], ['rhip', 'rkn', 'ran'], axisLength.hip);
+    return out; // midpoints are preserved by construction, so they still hold
+  }
+
   // --- GLOBAL UPRIGHT CORRECTION -----------------------------------------
   // MediaPipe reports world landmarks in a frame that follows the CAMERA, so a
   // webcam sitting below or above eye level tilts the entire skeleton — and on
@@ -1551,10 +1622,13 @@
     if (calibSettle > 0) calibSettle--;
     // Same frame the settle window closes, so the neutral frames below can be
     // captured from already-corrected points on that very frame.
-    if (calibSettle === 0 && !uprightQ && torsoConf >= 0.8 && calibrateUpright(P, conf('lan', 'ran') >= 0.8)){
-      calibrateTorsoUpright(P);
+    const readyToCalibrate = calibSettle === 0 && !uprightQ && torsoConf >= 0.8;
+    if (readyToCalibrate) calibrateAxisLengths(P);
+    const PD = depthCorrected(P);
+    if (readyToCalibrate && calibrateUpright(PD, conf('lan', 'ran') >= 0.8)){
+      calibrateTorsoUpright(PD);
     }
-    const PC = uprightCorrected(P);
+    const PC = uprightCorrected(PD);
 
     if (state.mode === 'rigged' && riggedBones){
       // Pelvis and chest first (the limbs hang off them), then the limbs, then
