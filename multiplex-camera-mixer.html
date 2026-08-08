@@ -678,6 +678,45 @@
     throw lastErr;
   }
 
+  // カメラのトラックは、USBの一時的な脱落・ドライバのリセット・applyConstraints の失敗などで
+  // 予告なく終了することがある。放置すると「映像が止まったまま無反応」になるため、
+  // 終了を検知して状態を明示し、一度だけ自動で開き直す。
+  function attachTrackWatch(cam, stream){
+    const track = stream.getVideoTracks()[0];
+    cam.track = track || null;
+    if (!track) return;
+
+    track.addEventListener('ended', () => {
+      if (cam.stopped || cam.stream !== stream) return;
+      cam.ready = false;
+      if (cam.capture){ cam.capture = null; }
+      updateStageState();
+      // 十分に持ちこたえた後の切断は「単発の事故」として再試行回数をリセットする。
+      // 成功のたびに無条件でリセットすると、開いた直後に落ちるカメラを延々と叩き続けてしまう。
+      if (Date.now() - (cam.streamStartedAt || 0) > 30000) cam.autoReconnects = 0;
+      if ((cam.autoReconnects || 0) < 2){
+        cam.autoReconnects = (cam.autoReconnects || 0) + 1;
+        setChStatus(cam, 'カメラが切断されました（トラック終了）。自動で再接続します…', 'busy');
+        setTimeout(() => { if (!cam.stopped && cam.stream === stream) reconnect(cam); }, 1000);
+      } else {
+        setChStatus(cam, 'カメラが繰り返し切断されます。USBを挿し直すか、別のポート（できればUSBハブを介さず直結）を試してから「↻ 再接続」を押してください。', 'warn');
+      }
+    });
+
+    track.addEventListener('mute', () => {
+      if (cam.stopped || cam.stream !== stream) return;
+      setChStatus(cam, 'カメラからの映像が一時停止しています（mute）。', 'warn');
+    });
+    track.addEventListener('unmute', () => {
+      if (cam.stopped || cam.stream !== stream) return;
+      plateStatusIdle(cam);
+    });
+  }
+
+  function trackLive(cam){
+    return !!(cam.track && cam.track.readyState === 'live');
+  }
+
   async function startStream(cam, deviceId){
     try {
       const stream = await openStream(deviceId);
@@ -686,10 +725,12 @@
       cam.lastError = null;
       cam.videoEl.srcObject = stream;
       await cam.videoEl.play().catch(()=>{});
+      attachTrackWatch(cam, stream);
       invalidatePlate(cam);
       createSegmenter(cam);
       if (!cam.loopStarted){ cam.loopStarted = true; processLoop(cam); }
       cam.ready = true;
+      cam.streamStartedAt = Date.now();
       updateStageState();
       return true;
     } catch(e){
@@ -715,9 +756,16 @@
     try { caps = track.getCapabilities() || {}; cur = track.getSettings() || {}; } catch(e){ /* ignore */ }
 
     const applied = [], failed = [];
+    let died = false;
+    // 一部の UVC カメラは applyConstraints でストリームを張り直し、失敗するとトラックごと
+    // 終了してしまう（＝カメラが切断されたように見える）。1項目ごとに生死を確認する。
     const tryApply = async (label, constraint) => {
-      try { await track.applyConstraints({ advanced: [constraint] }); applied.push(label); }
-      catch(e){ failed.push(label); }
+      if (died) { failed.push(label); return; }
+      try {
+        await track.applyConstraints({ advanced: [constraint] });
+        if (track.readyState !== 'live'){ died = true; failed.push(label); return; }
+        applied.push(label);
+      } catch(e){ failed.push(label); }
     };
 
     if (caps.exposureMode && caps.exposureMode.includes('manual')){
@@ -737,6 +785,12 @@
       if (cur.focusDistance != null) c.focusDistance = cur.focusDistance;
       await tryApply('フォーカス', c);
     } else failed.push('フォーカス');
+
+    if (died || track.readyState !== 'live'){
+      setChStatus(cam, 'このカメラは設定固定に対応しておらず、適用でストリームが落ちました。開き直します（固定はあきらめ、露出ドリフト補正で対応します）…', 'busy');
+      await reconnect(cam);
+      return;
+    }
 
     const parts = [];
     if (applied.length) parts.push('固定: ' + applied.join('/'));
@@ -822,6 +876,10 @@
   // ---------- 背景プレート ----------
   function startPlateCapture(cam, countdown){
     if (!cam.ready) return;
+    if (!trackLive(cam)){
+      setChStatus(cam, 'カメラからの映像が来ていないため記録できません。「↻ 再接続」を押してください。', 'warn');
+      return;
+    }
     if (cam.countdownTimer){ clearTimeout(cam.countdownTimer); cam.countdownTimer = null; }
     const tick = (left) => {
       if (cam.stopped) return;
@@ -834,7 +892,7 @@
       const n = cam.work.w * cam.work.h;
       if (!n) { plateStatusIdle(cam); return; }
       cam.capture = {
-        frames: 0, target: PLATE_FRAMES,
+        frames: 0, target: PLATE_FRAMES, lastAdvance: Date.now(),
         sum: new Float64Array(n * 3),
         sumSq: new Float64Array(n * 3)
       };
@@ -843,10 +901,14 @@
     tick(countdown);
   }
 
-  function capturePlateFrame(cam){
+  function capturePlateFrame(cam, d){
     const cap = cam.capture;
+    if (!trackLive(cam)){
+      cam.capture = null;
+      setChStatus(cam, '背景の記録を中止しました（記録中にカメラからの映像が途切れました）。', 'warn');
+      return;
+    }
     const n = cam.work.w * cam.work.h;
-    const d = grabWork(cam);
     const sum = cap.sum, sumSq = cap.sumSq;
     for (let i = 0; i < n; i++){
       const i3 = i * 3, i4 = i * 4;
@@ -856,6 +918,7 @@
       sum[i3+2] += b; sumSq[i3+2] += b * b;
     }
     cap.frames++;
+    cap.lastAdvance = Date.now();
     if (cap.frames >= cap.target) finishPlate(cam);
     else setChStatus(cam, `背景記録中… ${cap.frames}/${cap.target}`, 'busy');
   }
@@ -1051,7 +1114,11 @@
     const usePlate = cam.plate.ready && (s.matteMode === 'hybrid' || s.matteMode === 'diff');
     const useSeg = haveSeg && (s.matteMode === 'hybrid' || s.matteMode === 'ai');
 
-    const cur = grabWork(cam);
+    // フレームの読み出し(getImageData)は 1フレームにつき 1 回だけ。processLoop が取得済み。
+    // AI 経路では onResults がこの関数を呼ぶが、そのときも「セグメンテーションに渡したのと
+    // 同じフレーム」を使うことになるので、マスクと映像のズレも同時に無くなる。
+    const cur = cam.frameData;
+    if (!cur) return;
 
     if (usePlate){
       diffMatte(cam, cur, a);
@@ -1159,7 +1226,8 @@
   async function processLoop(cam){
     if (cam.stopped) return;
     if (cam.videoEl.readyState >= 2 && ensureWork(cam)){
-      if (cam.capture) capturePlateFrame(cam);
+      cam.frameData = grabWork(cam);
+      if (cam.capture) capturePlateFrame(cam, cam.frameData);
       const s = cam.settings;
       const wantAI = (s.matteMode === 'hybrid' || s.matteMode === 'ai');
       if (wantAI && cam.segmenter){
@@ -1327,6 +1395,11 @@
   // 合っていない（カメラが動いた・照明が変わった・露出が飛んだ）ことが一目で分かる。
   setInterval(() => {
     cams.forEach(cam => {
+      // 記録が進まなくなったら黙って固まらせず、原因を出して打ち切る
+      if (cam.capture && Date.now() - cam.capture.lastAdvance > 8000){
+        cam.capture = null;
+        setChStatus(cam, '背景の記録が進みませんでした（カメラからフレームが届いていません）。「↻ 再接続」を押してから、もう一度お試しください。', 'warn');
+      }
       const el = cam.el && cam.el.querySelector('.ch-diag');
       if (!el) return;
       if (!cam.plate.ready || cam.capture || cam.settings.matteMode === 'ai' || cam.settings.matteMode === 'off'){
