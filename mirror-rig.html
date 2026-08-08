@@ -86,11 +86,14 @@
 
   main{
     display:grid;
-    grid-template-columns: 1fr 320px;
+    /* minmax(0,1fr) rather than 1fr: a grid item's automatic minimum size is
+       its min-content width, which lets a wide child push the whole column
+       past the screen instead of shrinking. */
+    grid-template-columns: minmax(0, 1fr) 320px;
     gap:16px;
   }
   @media (max-width: 860px){
-    main{ grid-template-columns: 1fr; }
+    main{ grid-template-columns: minmax(0, 1fr); }
   }
 
   .panel{
@@ -100,10 +103,29 @@
     overflow:hidden;
   }
 
+  /* No min-height here. Combined with aspect-ratio it makes the browser derive
+     the WIDTH from that height (380 / 3 * 4 = 507px), which on a portrait phone
+     is wider than the screen — the box overflows and the centred figure gets
+     pushed off toward the right edge. Let the width lead instead. */
   #viewport-wrap{
     position:relative;
+    width:100%;
     aspect-ratio: 4 / 3;
-    min-height: 380px;
+  }
+  /* Must sit AFTER the rule above: same specificity, so source order decides.
+     A 4:3 landscape viewport leaves a standing figure only ~250px tall on a
+     phone; portrait suits a full-body avatar far better. */
+  @media (max-width: 860px){
+    #viewport-wrap{
+      aspect-ratio: 3 / 4;
+      /* On a wider single-column layout 3:4 would run past the bottom of the
+         screen (658px wide becomes 877px tall). Clamping the height simply
+         widens the box — the renderer reads the element's real size each
+         frame, so the view stays undistorted. dvh where supported, since a
+         phone's vh includes the browser chrome that isn't actually visible. */
+      max-height: 70vh;
+      max-height: 70dvh;
+    }
   }
   #viewport{ position:absolute; inset:0; }
   #viewport canvas{ display:block; width:100%; height:100%; cursor: grab; }
@@ -300,6 +322,13 @@
         </div>
         <div style="margin-top:12px; display:flex; flex-direction:column; gap:8px;">
           <div class="toggle-row" style="border-top:none; padding-top:0;">
+            <span>カメラの向き</span>
+            <select id="facingSelect" class="mono">
+              <option value="user" selected>内側（自撮り）</option>
+              <option value="environment">外側（背面）</option>
+            </select>
+          </div>
+          <div class="toggle-row">
             <span>カメラ</span>
             <select id="cameraSelect" class="mono"><option value="">検出中…</option></select>
           </div>
@@ -419,6 +448,7 @@
     skeletonOnly: false, // hide the model/figure and show only the bones (works in either mode)
     bgMode: 'dark', // 'dark' | 'transparent' | 'blue' | 'green'
     cameraId: '', // '' = let the browser choose; otherwise a specific deviceId
+    facing: 'user', // 'user' (inward/selfie) | 'environment' (rear) — phones/tablets
     smooth: {},
     fps: { frames: 0, last: performance.now(), value: 0 },
   };
@@ -697,11 +727,19 @@
     lastPoints = getDefaultPoints(); // so the skeleton view has something to draw before tracking starts
     setupCameraControls(renderer.domElement);
 
-    window.addEventListener('resize', () => {
-      camera.aspect = viewportEl.clientWidth / viewportEl.clientHeight;
+    function resizeViewport(){
+      const w = viewportEl.clientWidth, h = viewportEl.clientHeight;
+      if (w < 1 || h < 1) return; // element not laid out yet
+      camera.aspect = w / h;
       camera.updateProjectionMatrix();
-      renderer.setSize(viewportEl.clientWidth, viewportEl.clientHeight);
-    });
+      renderer.setSize(w, h);
+    }
+    window.addEventListener('resize', resizeViewport);
+    // The viewport also changes size without the window doing so — a media
+    // query swapping the aspect ratio, or the side panels growing. A window
+    // resize listener alone misses those and leaves the canvas at a stale size.
+    if (window.ResizeObserver) new ResizeObserver(resizeViewport).observe(viewportEl);
+    resizeViewport();
 
     animate();
   }
@@ -1771,7 +1809,10 @@
       // device that was actually asked for.
       c.deviceId = { exact: state.cameraId };
     } else {
-      c.facingMode = 'user';
+      // `ideal`, not `exact`: on a desktop with only one (front) camera an
+      // exact request for the rear one fails outright, where ideal just keeps
+      // the camera it has.
+      c.facingMode = { ideal: state.facing };
     }
     return c;
   }
@@ -1897,6 +1938,33 @@
     $('revertBtn').addEventListener('click', toggleAvatarMode);
     $('removeModelBtn').addEventListener('click', removeModel);
     $('flipBtn').addEventListener('click', flipModelFacing);
+    $('facingSelect').addEventListener('change', async (e) => {
+      state.facing = e.target.value;
+      const rear = state.facing === 'environment';
+      // facingMode is only consulted when no specific device is pinned, so a
+      // leftover device pick would silently override this choice.
+      if (state.cameraId){
+        state.cameraId = '';
+        $('cameraSelect').value = '';
+        log('カメラの指定を「ブラウザ既定」に戻しました（向きの指定を有効にするため）');
+      }
+      // Selfie views are shown mirrored by convention; a rear camera is not.
+      // Routed through the toggle so the calibration reset fires with it.
+      if (state.mirror === rear){
+        $('mirrorToggle').checked = !rear;
+        $('mirrorToggle').dispatchEvent(new Event('change'));
+      }
+      log(`カメラの向きを「${rear ? '外側（背面）' : '内側（自撮り）'}」にしました`);
+      if (!state.running) return;
+      try {
+        await openStream();
+      } catch (err){
+        showCameraError(err);
+        stopCamera();
+        setTrackDot('err');
+      }
+    });
+
     $('cameraSelect').addEventListener('change', async (e) => {
       state.cameraId = e.target.value;
       const opt = e.target.selectedOptions[0];
