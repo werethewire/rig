@@ -129,6 +129,9 @@
     cursor:pointer; outline:none;
   }
   .toggle-row select:focus{ border-color:var(--accent); }
+  /* Device labels can be long ("HD Pro Webcam C920 (046d:082d)") — keep the
+     dropdown from stretching the panel. */
+  #cameraSelect{ max-width:190px; text-overflow:ellipsis; }
 
   .viewport-hint{
     position:absolute; left:12px; bottom:12px;
@@ -296,7 +299,18 @@
           <span>MODEL <b id="modelVal">LOADING</b></span>
         </div>
         <div style="margin-top:12px; display:flex; flex-direction:column; gap:8px;">
+          <div class="toggle-row" style="border-top:none; padding-top:0;">
+            <span>カメラ</span>
+            <select id="cameraSelect" class="mono"><option value="">検出中…</option></select>
+          </div>
           <button class="btn primary" id="startBtn">▶ トラッキング開始</button>
+          <div class="btn-row" style="margin-top:0;">
+            <button class="btn half" id="recalibBtn">姿勢を基準化</button>
+            <button class="btn half" id="resetViewBtn">アングルを基準化</button>
+          </div>
+          <div class="model-hint">「姿勢を基準化」：カメラを正面から見て、まっすぐ立ち、頭も水平にした状態で押してください。その姿勢が「正面・直立」の基準になります（トラッキング開始時に自動取得）。前に傾いて見える／向きがずれた場合に押し直してください。カメラの高さや角度による全体の傾きもここで補正されます。プレビューのアングルも同時に正面へ戻ります。</div>
+          <div class="model-hint">「アングルを基準化」：プレビューの視点だけを真正面（水平・正面から）に戻します。</div>
+          <div class="model-hint">カメラ名は、一度トラッキングを開始してカメラ権限を許可すると表示されます。USBカメラや仮想カメラ（OBS / NDI 等）を後から接続した場合も自動で一覧に追加されます。</div>
         </div>
       </div>
 
@@ -313,9 +327,7 @@
         </div>
         <div class="btn-row">
           <button class="btn half" id="revertBtn" disabled>プロシージャルに戻す</button>
-          <button class="btn half" id="recalibHeadBtn" disabled>頭の向きを基準化</button>
         </div>
-        <div class="model-hint">「頭の向きを基準化」：カメラを正面から見て頭をまっすぐにした状態で押すと、その姿勢が頭の水平・正面になります（トラッキング開始時に自動取得）。</div>
         <div class="toggle-row">
           <span>モデルを隠してリグのみ表示</span>
           <label class="switch"><input type="checkbox" id="skeletonOnlyToggle" disabled><span class="slider"></span></label>
@@ -331,10 +343,6 @@
         <div class="toggle-row">
           <span>骨格オーバーレイ表示</span>
           <label class="switch"><input type="checkbox" id="skeletonToggle" checked><span class="slider"></span></label>
-        </div>
-        <div class="toggle-row">
-          <span>アイドル時に自動回転</span>
-          <label class="switch"><input type="checkbox" id="autoRotateToggle" checked><span class="slider"></span></label>
         </div>
         <div class="toggle-row">
           <span>背景</span>
@@ -407,10 +415,10 @@
     running: false,
     mirror: true,
     showSkeleton: true,
-    autoRotate: true,
     mode: 'procedural', // 'procedural' (built-in hologram figure) | 'rigged' (loaded GLB/VRM skeleton)
     modelSkeletonOnly: false, // when true (and mode==='rigged'): hide the loaded mesh, show only its bone rig
     bgMode: 'dark', // 'dark' | 'transparent' | 'blue' | 'green'
+    cameraId: '', // '' = let the browser choose; otherwise a specific deviceId
     smooth: {},
     fps: { frames: 0, last: performance.now(), value: 0 },
   };
@@ -419,10 +427,9 @@
     state.mirror = e.target.checked;
     // Mirroring reflects the landmarks, so the stored neutral head frame no
     // longer describes the same handedness — it has to be retaken.
-    resetHeadCalibration();
+    resetPoseCalibration();
   });
   $('skeletonToggle').addEventListener('change', e => state.showSkeleton = e.target.checked);
-  $('autoRotateToggle').addEventListener('change', e => state.autoRotate = e.target.checked);
   $('bgModeSelect').addEventListener('change', e => {
     state.bgMode = e.target.value;
     applyBackgroundMode();
@@ -567,8 +574,19 @@
   }
 
   // Camera orbit (simple drag + wheel, no external deps)
-  let camTheta = 0.15, camPhi = 1.25, camRadius = 3.2;
-  const camTarget = new THREE.Vector3(0, 0.9, 0);
+  // CAM_HOME is a dead-on FRONT view: theta 0 puts the camera on the +Z axis
+  // (the side the tracked figure faces), and phi π/2 puts it at the target's
+  // own height looking level, so there is no three-quarter turn and no tilt.
+  const CAM_HOME = { theta: 0, phi: Math.PI / 2, radius: 3.2, target: new THREE.Vector3(0, 0.9, 0) };
+  let camTheta = CAM_HOME.theta, camPhi = CAM_HOME.phi, camRadius = CAM_HOME.radius;
+  const camTarget = CAM_HOME.target.clone();
+  function resetCameraAngle(){
+    camTheta = CAM_HOME.theta;
+    camPhi = CAM_HOME.phi;
+    camRadius = CAM_HOME.radius;
+    camTarget.copy(CAM_HOME.target);
+    updateCameraPos();
+  }
   function updateCameraPos(){
     camera.position.set(
       camTarget.x + camRadius * Math.sin(camPhi) * Math.sin(camTheta),
@@ -689,10 +707,6 @@
 
   function animate(){
     requestAnimationFrame(animate);
-    if (!state.running && state.autoRotate){
-      camTheta += 0.0016;
-      updateCameraPos();
-    }
     updateRiggedJointMarkers();
     renderer.render(scene, camera);
   }
@@ -710,14 +724,18 @@
   // agnostic (works for Mixamo, VRoid/VRM, Unity-Humanoid-style skeletons,
   // any bind pose) because it never assumes a fixed axis convention.
   // ---------------------------------------------------------------------
-  const DRIVEN_BONES = ['torso','neck','leftUpperArm','leftLowerArm','rightUpperArm','rightLowerArm','leftUpperLeg','leftLowerLeg','rightUpperLeg','rightLowerLeg'];
+  // Limbs only. The pelvis, chest and head are not swing-driven — a direction
+  // alone cannot express which way a body part FACES, so they get full
+  // orientations instead (see the ORIENTATION section below).
+  const DRIVEN_BONES = ['neck','leftUpperArm','leftLowerArm','rightUpperArm','rightLowerArm','leftUpperLeg','leftLowerLeg','rightUpperLeg','rightLowerLeg'];
   const BONE_LABELS = {
-    torso:'胴体（腰→胸）', neck:'首（胸→頭）', leftUpperArm:'左上腕', leftLowerArm:'左前腕',
+    neck:'首（胸→頭）', leftUpperArm:'左上腕', leftLowerArm:'左前腕',
     rightUpperArm:'右上腕', rightLowerArm:'右前腕', leftUpperLeg:'左太もも',
     leftLowerLeg:'左すね', rightUpperLeg:'右太もも', rightLowerLeg:'右すね',
   };
 
-  let riggedRoot = null, riggedBones = null, riggedRestDirs = null, riggedRestQuats = null, riggedHead = null, gltfLoader = null;
+  let riggedRoot = null, riggedBones = null, riggedRestDirs = null, riggedRestQuats = null, gltfLoader = null;
+  let riggedPelvis = null, riggedChest = null, riggedHead = null; // orientation-driven
   // "リグのみ表示" 用: 読み込んだモデルの実メッシュ一覧、骨格ライン表示、関節マーカー
   let riggedMeshes = [], riggedSkeletonHelper = null, riggedJointMarkers = null;
   const _jointWP = new THREE.Vector3();
@@ -813,7 +831,7 @@
     if (neckDrive === hipsB) neckDrive = null; // would collide with the torso segment
 
     const map = {
-      torso: hipsB, neck: neckDrive,
+      neck: neckDrive,
       leftUpperArm: lUpperArm, leftLowerArm: lLowerArm,
       rightUpperArm: rUpperArm, rightLowerArm: rLowerArm,
       leftUpperLeg: lUpperLeg, leftLowerLeg: lLowerLeg,
@@ -821,18 +839,7 @@
     };
 
     // Rest-direction targets, as world positions captured in the bind pose.
-    // Torso prefers the true shoulder midpoint (the anatomical counterpart of
-    // MediaPipe's midHip→midSh vector) over any single spine child bone.
-    let torsoTarget = null;
-    if (lUpperArm && rUpperArm){
-      torsoTarget = worldPos(lUpperArm).add(worldPos(rUpperArm)).multiplyScalar(0.5);
-      if (hipsB && torsoTarget.distanceToSquared(worldPos(hipsB)) < 1e-8) torsoTarget = null;
-    }
-    if (!torsoTarget) torsoTarget = nonDegenerateTargetPos(hipsB, chestB !== hipsB ? chestB : firstBoneChild(hipsB));
-    if (!torsoTarget) torsoTarget = nonDegenerateTargetPos(hipsB, headB);
-
     const targetPos = {
-      torso: torsoTarget,
       neck: nonDegenerateTargetPos(neckDrive, headB || firstBoneChild(neckDrive)),
       leftUpperArm: nonDegenerateTargetPos(lUpperArm, lLowerArm || firstBoneChild(lUpperArm)),
       leftLowerArm: nonDegenerateTargetPos(lLowerArm, lHand || firstBoneChild(lLowerArm)),
@@ -885,32 +892,41 @@
     bone.updateMatrixWorld(true);
   }
 
-  // --- HEAD ORIENTATION ---------------------------------------------------
-  // The head can't be driven the way the limbs are. A limb only needs a
-  // direction, but "where the head points" is a full orientation, and the only
-  // head landmark that reads as a direction is the nose — which sits in FRONT
-  // of the neck, not above it. Aiming the head bone's axis at the nose
-  // therefore tips the head forward by the nose's own offset, every frame,
-  // whatever the person actually does.
+  // --- ORIENTATION-DRIVEN BONES (pelvis / chest / head) --------------------
+  // These three can't be driven the way the limbs are. A limb only needs a
+  // direction; the pelvis, chest and head need a full orientation, because
+  // "which way the body faces" is a rotation ABOUT the spine axis and a
+  // direction carries no information about it at all — that is why the torso
+  // used to ignore the body turning left and right entirely.
   //
-  // So we solve the head's orientation instead of its direction, from a frame
-  // built out of the head's own landmarks:
-  //   right = ear → ear      (rock-solid, and it turns with the head)
-  //   fwd   = ear-mid → nose (where the face looks)
-  //   up    = fwd × right    (perpendicular to both)
+  // Driving them from a direction also imports a permanent lean. The head's
+  // only direction-like landmark is the nose, which sits in FRONT of the neck
+  // rather than above it; the torso's is hips→shoulders, and the shoulder
+  // joints sit forward of the hip joints in any upright human. Both therefore
+  // tip the model forward by a fixed amount every single frame, whatever the
+  // person is actually doing.
   //
-  // That frame still can't be compared against the model directly: "up" here is
-  // perpendicular to the NOSE direction, and the nose sits below the ear line
-  // by an amount that is a property of the face, not of the pose. Measured
-  // against the rig's own head axis it leaves a fixed ~17° pitch bias — the
-  // same permanent lean, just smaller.
+  // So each of the three gets an orthonormal frame built from a "right" axis
+  // and an "up" axis measured directly off the landmarks:
+  //   pelvis: right = hip → hip,      up = hip-mid → shoulder-mid
+  //   chest : right = shoulder → shoulder, up = hip-mid → shoulder-mid
+  //   head  : right = ear → ear,      up = fwd × right, fwd = ear-mid → nose
+  // The left/right axis is what carries the body turning sideways, which is
+  // exactly the information a direction throws away. Pelvis and chest are
+  // driven separately so that twisting only the upper body turns the chest
+  // without dragging the legs around with it.
   //
-  // So the frame is compared against ITSELF instead: one frame is captured as
-  // the neutral reference while the person is facing the camera with their head
-  // level, and every later frame is applied as the rotation away from that
-  // reference. Whatever the face's proportions are, they are present in both
-  // frames and cancel exactly — a neutral head lands precisely on the bind
-  // pose, i.e. no tilt at all.
+  // The frames still can't be compared against the model directly — they carry
+  // the person's own proportions (how far forward the shoulders sit, how far
+  // below the ear line the nose sits), which is anatomy, not pose. Measured
+  // against the rig's bind pose that leaves a fixed lean; for the head it is
+  // about 17°, i.e. the same permanent tip, just smaller.
+  //
+  // So each frame is compared against ITSELF instead: one frame is captured as
+  // the neutral reference while the person stands facing the camera, and every
+  // later frame is applied as the rotation away from that reference. The
+  // proportions are present in both frames and cancel exactly — a neutral pose
+  // lands precisely on the bind pose, i.e. no lean at all.
   const _basisM = new THREE.Matrix4();
   function basisQuaternion(rightRaw, upRaw){
     const up = upRaw.clone();
@@ -918,7 +934,7 @@
     up.normalize();
     const right = rightRaw.clone();
     right.sub(up.clone().multiplyScalar(right.dot(up))); // orthogonalize against up
-    if (right.lengthSq() < 1e-8) return null;            // ears collapsed onto the head axis
+    if (right.lengthSq() < 1e-8) return null;            // axes collapsed onto each other
     right.normalize();
     const fwd = new THREE.Vector3().crossVectors(right, up);
     _basisM.makeBasis(right, up, fwd);
@@ -931,54 +947,100 @@
     const fwd = new THREE.Vector3().subVectors(P.nose, P.midEar);
     const up = new THREE.Vector3().crossVectors(fwd, right);
     // Mirror mode reflects every landmark across X. A reflection is not a
-    // rotation, so the frame comes out left-handed and this cross product
-    // points at the floor; flip it back.
+    // rotation, so this cross product comes out pointing at the floor; flip it
+    // back. (The pelvis/chest frames measure both axes directly and so need no
+    // such correction — the reflection cancels out of the neutral-relative
+    // delta on its own.)
     if (mirrored) up.negate();
     return basisQuaternion(right, up);
+  }
+
+  function pelvisBasisFromPoints(P){
+    return basisQuaternion(
+      new THREE.Vector3().subVectors(P.lhip, P.rhip),    // pelvis' right → left
+      new THREE.Vector3().subVectors(P.midSh, P.midHip)  // spine direction
+    );
+  }
+  function chestBasisFromPoints(P){
+    return basisQuaternion(
+      new THREE.Vector3().subVectors(P.lsh, P.rsh),      // shoulder line
+      new THREE.Vector3().subVectors(P.midSh, P.midHip)
+    );
   }
 
   // Captured at load, with the model in its bind pose. Stored relative to
   // riggedRoot's own rotation so that the「向きを180°回転」button (which rotates
   // riggedRoot) doesn't invalidate it.
-  function buildHeadOrientationRig(detection){
-    const bone = detection.headB;
+  function buildOrientationRig(bone){
     if (!bone || !bone.parent) return null;
     const rootQ = new THREE.Quaternion(); riggedRoot.getWorldQuaternion(rootQ);
     const bindQ = new THREE.Quaternion(); bone.getWorldQuaternion(bindQ);
     return { bone, bindQLocal: rootQ.invert().multiply(bindQ) };
   }
 
-  // The neutral reference frame. Null until calibrated; while it is null the
-  // head simply stays in its bind pose, which already looks correct.
-  let headNeutralQ = null;
-  function resetHeadCalibration(reason){
-    headNeutralQ = null;
+  // The neutral reference frames. Null until calibrated; while they are null
+  // the bones simply stay in their bind pose, which already looks correct.
+  const neutralQ = { pelvis: null, chest: null, head: null };
+  // Frames to let settle before any reference is captured. The landmark
+  // smoothing buffers still hold the PREVIOUS pose at the moment of a reset, so
+  // the very next frame is a blend of old and new — capturing a reference from
+  // it bakes a pose the person was never in into the calibration. Dropping the
+  // buffers fixes the blend; the settle window additionally covers the person
+  // still moving when they press the button.
+  const CALIB_SETTLE_FRAMES = 8;
+  let calibSettle = 0;
+  // Gate for the per-bone neutral frames. They must never be captured before
+  // the global upright correction exists, or they bake in the very tilt that
+  // correction is about to remove.
+  const canCalibrate = () => calibSettle === 0 && !!uprightQ;
+
+  function resetPoseCalibration(reason){
+    neutralQ.pelvis = neutralQ.chest = neutralQ.head = null;
+    uprightQ = null; torsoUprightLocal = null;
+    state.smooth = {};
+    heldOffset = {};
+    calibSettle = CALIB_SETTLE_FRAMES;
     if (reason) log(reason);
   }
 
   const _hqRoot = new THREE.Quaternion(), _hqParent = new THREE.Quaternion();
-  // headConfidence: MediaPipe's visibility for the nose/ear landmarks. The
-  // neutral frame is only taken from a confidently-seen head, so a half-
-  // detected first frame can't poison the reference for the whole session.
-  function applyHeadOrientation(P, mirrored, headConfidence){
-    if (!riggedHead) return;
-    const targetQ = headBasisFromPoints(P, mirrored);
-    if (!targetQ) return; // degenerate landmarks — leave the head where it was
-
-    if (!headNeutralQ){
-      if (headConfidence < 0.8) return;
-      headNeutralQ = targetQ.clone();
-      log('頭の向きの基準を取得しました（今の姿勢が「正面・水平」になります）');
-    }
-
+  function applyBoneOrientation(rig, targetQ, neutral){
     riggedRoot.getWorldQuaternion(_hqRoot);
-    const bindQ = _hqRoot.multiply(riggedHead.bindQLocal);
+    const bindQ = _hqRoot.multiply(rig.bindQLocal);
+    // delta = how far this frame has rotated away from the neutral reference
+    const worldTarget = targetQ.clone().multiply(neutral.clone().invert()).multiply(bindQ);
+    rig.bone.parent.getWorldQuaternion(_hqParent);
+    rig.bone.quaternion.copy(_hqParent.invert().multiply(worldTarget));
+    rig.bone.updateMatrixWorld(true);
+  }
 
-    // delta = how far the head has rotated away from the neutral reference
-    const worldTarget = targetQ.multiply(headNeutralQ.clone().invert()).multiply(bindQ);
-    riggedHead.bone.parent.getWorldQuaternion(_hqParent);
-    riggedHead.bone.quaternion.copy(_hqParent.invert().multiply(worldTarget));
-    riggedHead.bone.updateMatrixWorld(true);
+  // `confidence` is MediaPipe's visibility for the landmarks the frame is built
+  // from. A neutral reference is only taken from confidently-seen landmarks, so
+  // a half-detected first frame can't poison it for the whole session.
+  function driveOrientation(key, rig, targetQ, confidence, calibratedMsg){
+    if (!rig || !targetQ) return; // no bone, or degenerate landmarks — leave it be
+    if (!neutralQ[key]){
+      if (!canCalibrate() || confidence < 0.8) return;
+      neutralQ[key] = targetQ.clone();
+      log(calibratedMsg);
+    }
+    applyBoneOrientation(rig, targetQ, neutralQ[key]);
+  }
+
+  // Applied BEFORE the limb swings: the limbs hang off these two, and a swing
+  // is resolved against its parent's current world rotation.
+  function applyTorsoOrientations(P, confidence){
+    driveOrientation('pelvis', riggedPelvis, pelvisBasisFromPoints(P), confidence,
+      '体の向きの基準を取得しました（今の姿勢が「正面・直立」になります）');
+    driveOrientation('chest', riggedChest, chestBasisFromPoints(P), confidence,
+      '上体の向きの基準を取得しました');
+  }
+
+  // Applied AFTER them: on rigs that have a neck bone the head hangs off it,
+  // and the neck is swing-driven along with the limbs.
+  function applyHeadOrientation(P, mirrored, confidence){
+    driveOrientation('head', riggedHead, headBasisFromPoints(P, mirrored), confidence,
+      '頭の向きの基準を取得しました');
   }
 
   function applyPointsToRiggedModel(P){
@@ -1046,16 +1108,15 @@
       el.appendChild(row);
     });
 
-    // The head isn't swing-driven like the others — it gets a full orientation
-    // from the ear/nose frame — so it's listed separately.
-    const headRow = document.createElement('div');
-    headRow.className = 'row';
-    const headOk = !!riggedHead;
-    headRow.title = headOk
-      ? `頭（向き）→ ボーン「${riggedHead.bone.name}」`
-      : '頭（向き）は割り当てできませんでした';
-    headRow.innerHTML = `<span>頭（向き）</span><span class="${headOk ? 'ok' : 'bad'}">${headOk ? '✓ ' + riggedHead.bone.name : '— 未検出'}</span>`;
-    el.appendChild(headRow);
+    // These three aren't swing-driven like the rest — they get a full
+    // orientation — so they're listed separately.
+    [['腰（向き）', riggedPelvis], ['上体（向き）', riggedChest], ['頭（向き）', riggedHead]].forEach(([label, rig]) => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.title = rig ? `${label} → ボーン「${rig.bone.name}」` : `${label} は割り当てできませんでした`;
+      row.innerHTML = `<span>${label}</span><span class="${rig ? 'ok' : 'bad'}">${rig ? '✓ ' + rig.bone.name : '— 未検出'}</span>`;
+      el.appendChild(row);
+    });
   }
 
   function loadModelFile(file){
@@ -1103,9 +1164,15 @@
             riggedRestDirs[name] = computeRestDir(bone, detection.targetPos[name], name === 'neck');
             riggedRestQuats[name] = bone ? bone.quaternion.clone() : null;
           });
-          riggedHead = buildHeadOrientationRig(detection);
-          resetHeadCalibration();
-          const foundCount = DRIVEN_BONES.filter(n => detection.map[n] && riggedRestDirs[n]).length + (riggedHead ? 1 : 0);
+          riggedPelvis = buildOrientationRig(detection.hipsB);
+          // Only when the chest is a bone of its own — on a rig whose chest IS
+          // the hips bone there is nothing left to twist independently.
+          riggedChest = (detection.chestB && detection.chestB !== detection.hipsB)
+            ? buildOrientationRig(detection.chestB) : null;
+          riggedHead = buildOrientationRig(detection.headB);
+          resetPoseCalibration();
+          const foundCount = DRIVEN_BONES.filter(n => detection.map[n] && riggedRestDirs[n]).length
+            + [riggedPelvis, riggedChest, riggedHead].filter(Boolean).length;
           updateBoneChecklist();
           // Limbs only. The default pose is a rig-space placeholder rather than
           // tracked data, and its facing need not match the model's, so the
@@ -1122,12 +1189,11 @@
           riggedRoot.visible = true;
           applyModelDisplayMode();
 
-          statusEl.textContent = `読み込み完了：${file.name}（全${bones.length}ボーン中 ${foundCount}/${DRIVEN_BONES.length + 1}部位を自動検出）`;
-          log(`3Dモデルを読み込みました: ${file.name}（${foundCount}/${DRIVEN_BONES.length + 1}部位を自動検出）`);
+          statusEl.textContent = `読み込み完了：${file.name}（全${bones.length}ボーン中 ${foundCount}/${DRIVEN_BONES.length + 3}部位を自動検出）`;
+          log(`3Dモデルを読み込みました: ${file.name}（${foundCount}/${DRIVEN_BONES.length + 3}部位を自動検出）`);
           setRevertButtonLabel();
           $('removeModelBtn').disabled = false;
           $('flipBtn').disabled = false;
-          $('recalibHeadBtn').disabled = !riggedHead;
           $('modelFile').disabled = false;
 
           if (foundCount < 4){
@@ -1244,8 +1310,9 @@
     if (riggedSkeletonHelper){ scene.remove(riggedSkeletonHelper); riggedSkeletonHelper.geometry.dispose(); riggedSkeletonHelper.material.dispose(); riggedSkeletonHelper = null; }
     if (riggedJointMarkers){ scene.remove(riggedJointMarkers); disposeObject3D(riggedJointMarkers); riggedJointMarkers = null; }
     riggedMeshes = [];
-    riggedBones = null; riggedRestDirs = null; riggedRestQuats = null; riggedHead = null;
-    resetHeadCalibration();
+    riggedBones = null; riggedRestDirs = null; riggedRestQuats = null;
+    riggedPelvis = null; riggedChest = null; riggedHead = null;
+    resetPoseCalibration();
     state.mode = 'procedural';
     state.modelSkeletonOnly = false;
     avatarRoot.visible = true;
@@ -1253,7 +1320,6 @@
     $('boneChecklist').innerHTML = '';
     $('removeModelBtn').disabled = true;
     $('flipBtn').disabled = true;
-    $('recalibHeadBtn').disabled = true;
     setRevertButtonLabel();
     applyModelDisplayMode();
     log('モデルを外しました');
@@ -1270,6 +1336,19 @@
   const ROOT_Y = 0.93;
   const SMOOTH_ALPHA = 0.5;
 
+  // MediaPipe always returns all 33 landmarks, guessing at the ones it cannot
+  // actually see — and its guesses for a limb that has left frame or gone
+  // behind the body swing around wildly from frame to frame. Driving a bone
+  // from those snaps the joint into angles a body can't reach. Below this
+  // visibility the joint is held instead (see the loop in onResults), and it
+  // picks the live pose straight back up once the landmark is seen again.
+  const LANDMARK_MIN_VIS = 0.5;
+  const LIMB_PARENT = {
+    lel: 'lsh', lwr: 'lel', rel: 'rsh', rwr: 'rel',
+    lkn: 'lhip', lan: 'lkn', rkn: 'rhip', ran: 'rkn',
+  };
+  let heldOffset = {}; // last confidently-seen child-minus-parent vector
+
   function toWorld(lm){
     const mirrorSign = state.mirror ? -1 : 1;
     return new THREE.Vector3(mirrorSign * lm.x * SCALE, -lm.y * SCALE + ROOT_Y, -lm.z * SCALE);
@@ -1279,6 +1358,96 @@
     if (!prev){ state.smooth[key] = target.clone(); return state.smooth[key]; }
     prev.lerp(target, SMOOTH_ALPHA);
     return prev;
+  }
+
+  // --- GLOBAL UPRIGHT CORRECTION -----------------------------------------
+  // MediaPipe reports world landmarks in a frame that follows the CAMERA, so a
+  // webcam sitting below or above eye level tilts the entire skeleton — and on
+  // top of that, the shoulder joints sit forward of the hip joints in any
+  // upright human. Both read as the whole figure leaning forward, and because
+  // the procedural avatar plots the landmarks directly it shows the lean raw,
+  // with no bind pose to hide it.
+  //
+  // Fixed as part of the same neutral calibration: the spine axis measured at
+  // calibration time is rotated onto world vertical, and that one rigid
+  // rotation is then applied to every point about the hip midpoint. Being
+  // rigid, it straightens the figure without pulling any segment apart, and it
+  // deliberately carries no twist — the body's left/right facing is already
+  // correct in a direct plot and must not be touched.
+  let uprightQ = null;
+  const WORLD_UP = new THREE.Vector3(0, 1, 0);
+  function calibrateUpright(P, legsVisible){
+    // Which way is DOWN in the landmark frame? A standing person's legs are
+    // vertical, so ankle→hip is the honest answer. The spine is NOT vertical —
+    // the shoulder joints sit forward of the hip joints — so calibrating on it
+    // would over-rotate by that anatomical angle and leave the legs kicked out
+    // backwards by the same amount. The spine is only the fallback for framings
+    // where the legs aren't reliably seen, and there they're off screen anyway.
+    const up = new THREE.Vector3();
+    if (legsVisible){
+      const midAnkle = new THREE.Vector3().addVectors(P.lan, P.ran).multiplyScalar(0.5);
+      up.subVectors(P.midHip, midAnkle);
+    }
+    if (up.lengthSq() < 1e-8) up.subVectors(P.midSh, P.midHip);
+    if (up.lengthSq() < 1e-8) return false;
+    uprightQ = new THREE.Quaternion().setFromUnitVectors(up.normalize(), WORLD_UP);
+    log(legsVisible ? '姿勢の基準を取得しました（脚の向きを鉛直の基準に使用）'
+                    : '姿勢の基準を取得しました（脚が映っていないため背骨を基準に使用）');
+    return true;
+  }
+
+  // Second stage. Straightening on the legs leaves the torso showing its real
+  // anatomical forward angle, which is honest but still reads as a slouch —
+  // and it disagrees with the rigged model, whose chest is calibrated to sit
+  // upright. So the remaining spine angle is calibrated out too, but only for
+  // the points that ride ABOVE the hips, so the legs keep pointing where they
+  // actually point. Everything above the hips moves as one rigid piece about
+  // the hip midpoint, so no segment is pulled apart.
+  let torsoUprightLocal = null;
+  const UPPER_BODY_KEYS = ['nose','lear','rear','lsh','rsh','lel','rel','lwr','rwr','midSh','midEar'];
+
+  // The body's own frame, on globally-corrected points. The global correction
+  // is a rotation about the hip midpoint, so it acts on these difference
+  // vectors by simple rotation.
+  function pelvisFrameAfterGlobal(P){
+    return basisQuaternion(
+      new THREE.Vector3().subVectors(P.lhip, P.rhip).applyQuaternion(uprightQ),
+      new THREE.Vector3().subVectors(P.midSh, P.midHip).applyQuaternion(uprightQ)
+    );
+  }
+
+  function calibrateTorsoUpright(P){
+    const spine = new THREE.Vector3().subVectors(P.midSh, P.midHip).applyQuaternion(uprightQ);
+    if (spine.lengthSq() < 1e-8) return false;
+    const correction = new THREE.Quaternion().setFromUnitVectors(spine.normalize(), WORLD_UP);
+    const frame0 = pelvisFrameAfterGlobal(P);
+    if (!frame0){ torsoUprightLocal = null; return false; }
+    // Stored in the body's frame rather than the world's. A world-fixed
+    // correction stops lining up with the spine the moment the person turns —
+    // by 90° it has become a sideways lean instead of a forward one.
+    torsoUprightLocal = frame0.clone().invert().multiply(correction).multiply(frame0);
+    return true;
+  }
+
+  // Returns a corrected COPY. The originals are the smoothing buffers held in
+  // state.smooth, so correcting them in place would feed each frame's
+  // correction into the next one and run away.
+  function uprightCorrected(P){
+    if (!uprightQ) return P;
+    const pivot = P.midHip; // invariant under both stages
+    const out = {};
+    for (const k in P) out[k] = P[k].clone().sub(pivot).applyQuaternion(uprightQ).add(pivot);
+    if (torsoUprightLocal){
+      const frame = pelvisFrameAfterGlobal(P);
+      if (frame){
+        const eff = frame.clone().multiply(torsoUprightLocal).multiply(frame.invert());
+        UPPER_BODY_KEYS.forEach(k => {
+          const v = out[k];
+          if (v) v.sub(pivot).applyQuaternion(eff).add(pivot);
+        });
+      }
+    }
+    return out;
   }
 
   let video, previewCanvas, pctx, pose;
@@ -1345,22 +1514,56 @@
     $('confVal').textContent = visN ? (visSum / visN).toFixed(2) : '--';
     $('pointsVal').textContent = String(detected);
 
+    // IDX is ordered parent-before-child for both arms and legs, so a held
+    // joint can always read its parent's already-resolved position.
     const P = {};
-    for (const k in IDX) P[k] = smoothPoint(k, toWorld(lm[IDX[k]]));
+    for (const k in IDX){
+      const i = IDX[k];
+      const seen = vis[i] ? (vis[i].visibility ?? 1) : 0;
+      const parent = LIMB_PARENT[k];
+      if (seen >= LANDMARK_MIN_VIS || !state.smooth[k]){
+        P[k] = smoothPoint(k, toWorld(lm[i]));
+        if (parent && P[parent]){
+          (heldOffset[k] = heldOffset[k] || new THREE.Vector3()).subVectors(P[k], P[parent]);
+        }
+      } else if (parent && P[parent] && heldOffset[k]){
+        // Carry the segment rigidly with its parent. Simply freezing the far
+        // end in space would leave it anchored while the parent moves away,
+        // which is exactly what wrenches the joint into an impossible angle.
+        P[k] = smoothPoint(k, new THREE.Vector3().addVectors(P[parent], heldOffset[k]));
+      } else {
+        P[k] = state.smooth[k];
+      }
+    }
     P.midSh = new THREE.Vector3().addVectors(P.lsh, P.rsh).multiplyScalar(0.5);
     P.midHip = new THREE.Vector3().addVectors(P.lhip, P.rhip).multiplyScalar(0.5);
     P.midEar = new THREE.Vector3().addVectors(P.lear, P.rear).multiplyScalar(0.5);
 
+    const conf = (...keys) => Math.min(...keys.map(k => {
+      const p = vis[IDX[k]];
+      return p ? (p.visibility ?? 1) : 0;
+    }));
+    const torsoConf = conf('lsh', 'rsh', 'lhip', 'rhip');
+
+    // Straighten the whole skeleton first, so everything downstream — the
+    // procedural figure, the swing-driven limbs, and the neutral frames
+    // captured just below — all work from an upright point set.
+    if (calibSettle > 0) calibSettle--;
+    // Same frame the settle window closes, so the neutral frames below can be
+    // captured from already-corrected points on that very frame.
+    if (calibSettle === 0 && !uprightQ && torsoConf >= 0.8 && calibrateUpright(P, conf('lan', 'ran') >= 0.8)){
+      calibrateTorsoUpright(P);
+    }
+    const PC = uprightCorrected(P);
+
     if (state.mode === 'rigged' && riggedBones){
-      applyPointsToRiggedModel(P);
-      const headConf = Math.min(
-        vis[IDX.nose] ? (vis[IDX.nose].visibility ?? 1) : 0,
-        vis[IDX.lear] ? (vis[IDX.lear].visibility ?? 1) : 0,
-        vis[IDX.rear] ? (vis[IDX.rear].visibility ?? 1) : 0
-      );
-      applyHeadOrientation(P, state.mirror, headConf); // after the limbs — the head rides on them
+      // Pelvis and chest first (the limbs hang off them), then the limbs, then
+      // the head (on rigs with a neck bone it hangs off the swing-driven neck).
+      applyTorsoOrientations(PC, torsoConf);
+      applyPointsToRiggedModel(PC);
+      applyHeadOrientation(PC, state.mirror, conf('nose', 'lear', 'rear'));
     } else {
-      applyPointsToRig(P);
+      applyPointsToRig(PC);
     }
   }
 
@@ -1391,6 +1594,120 @@
   }
 
   let stream = null;
+  let videoDevices = [];
+
+  // Browsers hide device labels — and, in Chrome, deviceIds too — until the
+  // page has been granted camera permission at least once. So the list is
+  // (re)built both on boot and immediately after a successful getUserMedia,
+  // and again whenever a device is plugged in or a virtual camera (OBS, NDI…)
+  // starts or stops.
+  async function refreshCameraList(){
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    let devices;
+    try { devices = await navigator.mediaDevices.enumerateDevices(); }
+    catch (e){ log('⚠ カメラ一覧の取得に失敗しました: ' + e.message); return; }
+
+    videoDevices = devices.filter(d => d.kind === 'videoinput' && d.deviceId);
+    const sel = $('cameraSelect');
+    const keep = state.cameraId;
+    sel.innerHTML = '';
+    const def = document.createElement('option');
+    def.value = '';
+    def.textContent = 'ブラウザ既定のカメラ';
+    sel.appendChild(def);
+    videoDevices.forEach((d, i) => {
+      const o = document.createElement('option');
+      o.value = d.deviceId;
+      o.textContent = d.label || `カメラ ${i + 1}（権限許可後に名称表示）`;
+      sel.appendChild(o);
+    });
+    // Keep the user's pick if that device is still present, else fall back.
+    const stillThere = videoDevices.some(d => d.deviceId === keep);
+    if (keep && !stillThere) log('⚠ 選択していたカメラが見つからないため、既定のカメラに戻しました');
+    state.cameraId = stillThere ? keep : '';
+    sel.value = state.cameraId;
+  }
+
+  function buildVideoConstraints(){
+    const c = { width: { ideal: 640 }, height: { ideal: 480 } };
+    if (state.cameraId){
+      // Pin exactly the device the user picked. facingMode is deliberately
+      // left out here — USB and virtual cameras generally don't report it, and
+      // sending it alongside a deviceId only biases the browser away from the
+      // device that was actually asked for.
+      c.deviceId = { exact: state.cameraId };
+    } else {
+      c.facingMode = 'user';
+    }
+    return c;
+  }
+
+  // A camera can hand over a perfectly valid track that never delivers a single
+  // frame — a virtual camera (OBS / NDI Webcam) with nothing selected on the
+  // sending side does exactly that, and so does a physical camera behind a
+  // closed privacy shutter. video.play() then simply never settles, which would
+  // leave the UI frozen mid-start with no error at all. Wait for the first
+  // frame on a deadline instead.
+  const FIRST_FRAME_TIMEOUT_MS = 6000;
+  function waitForFirstFrame(el, ms){
+    if (el.readyState >= 2) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timer); el.removeEventListener('loadeddata', onData); };
+      const onData = () => { cleanup(); resolve(); };
+      const timer = setTimeout(() => {
+        cleanup();
+        const e = new Error('カメラから映像フレームが届きませんでした');
+        e.name = 'NoFramesError';
+        reject(e);
+      }, ms);
+      el.addEventListener('loadeddata', onData);
+    });
+  }
+
+  // Opens (or re-opens) the capture stream with the currently selected device.
+  async function openStream(){
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({ video: buildVideoConstraints(), audio: false });
+    video.srcObject = stream;
+    // Deliberately not awaited — see waitForFirstFrame above.
+    const played = video.play();
+    if (played && played.catch) played.catch(() => {});
+    try {
+      await waitForFirstFrame(video, FIRST_FRAME_TIMEOUT_MS);
+    } catch (e){
+      // Release the device so another one can be tried straight away.
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+      video.srcObject = null;
+      throw e;
+    }
+    await refreshCameraList(); // labels/ids only become readable once permitted
+    const track = stream.getVideoTracks()[0];
+    if (track) log('使用中のカメラ: ' + (track.label || '(名称不明)'));
+  }
+
+  function showCameraError(err){
+    const name = err && err.name;
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError'){
+      showError('カメラへのアクセスが許可されませんでした。ブラウザのアドレスバー付近のカメラ権限設定から許可してください。');
+    } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError'){
+      showError('カメラが1台も見つかりませんでした。接続を確認し、「カメラ」の一覧を選び直してください。');
+    } else if (name === 'NotReadableError' || name === 'TrackStartError'){
+      showError('カメラを開けませんでした。他のアプリ（OBS、Zoom、Teams、カメラアプリ等）が同じカメラを使用している可能性があります。そちらを終了してから再試行してください。');
+    } else if (name === 'NoFramesError'){
+      showError('カメラは開けましたが、映像が届きませんでした。\n' +
+        '・仮想カメラ（OBS / NDI Webcam 等）の場合：送出側でカメラを開始し、ソースが選択されているか確認してください。\n' +
+        '・物理カメラの場合：プライバシーシャッター／レンズカバー、または他アプリによる占有を確認してください。\n' +
+        '「カメラ」の一覧から別のカメラを選び直して再試行することもできます。');
+    } else if (name === 'OverconstrainedError'){
+      showError('選択したカメラを要求した設定で開けませんでした。カメラが取り外されたか、対応していない可能性があります。「ブラウザ既定のカメラ」に戻して再試行してください。');
+    } else if (err && err.message && err.message.includes('MediaPipe')){
+      showError('モーション検出ライブラリの読み込みに失敗しました。ネットワーク接続、または広告ブロッカー等の拡張機能の設定をご確認のうえ、ページを再読み込みしてください。');
+    } else {
+      showError('カメラの起動に失敗しました：' + (err && err.message ? err.message : String(err)));
+    }
+  }
+
   async function startCamera(){
     if (isFileProtocol()){
       showFileProtocolNotice();
@@ -1400,11 +1717,9 @@
     btn.disabled = true;
     try{
       if (!pose){ await initPose(); }
-      stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' }, audio: false });
-      video.srcObject = stream;
-      await video.play();
+      await openStream();
       state.running = true;
-      resetHeadCalibration(); // the neutral head frame is retaken for each session
+      resetPoseCalibration(); // the neutral frames are retaken for each session
       log('カメラを起動しました。トラッキングを開始します');
       btn.textContent = '■ トラッキング停止';
       btn.classList.remove('primary'); btn.classList.add('stop');
@@ -1413,13 +1728,7 @@
       detectLoop();
     } catch (err){
       btn.disabled = false;
-      if (err && err.name === 'NotAllowedError'){
-        showError('カメラへのアクセスが許可されませんでした。ブラウザのアドレスバー付近のカメラ権限設定から許可してください。');
-      } else if (err && err.message && err.message.includes('MediaPipe')){
-        showError('モーション検出ライブラリの読み込みに失敗しました。ネットワーク接続、または広告ブロッカー等の拡張機能の設定をご確認のうえ、ページを再読み込みしてください。');
-      } else {
-        showError('カメラの起動に失敗しました：' + (err && err.message ? err.message : String(err)));
-      }
+      showCameraError(err);
       setTrackDot('err');
     }
   }
@@ -1454,8 +1763,43 @@
     $('revertBtn').addEventListener('click', toggleAvatarMode);
     $('removeModelBtn').addEventListener('click', removeModel);
     $('flipBtn').addEventListener('click', flipModelFacing);
-    $('recalibHeadBtn').addEventListener('click', () => {
-      resetHeadCalibration('頭の向きの基準を取り直します。カメラを正面から見て、頭をまっすぐにしてください');
+    $('cameraSelect').addEventListener('change', async (e) => {
+      state.cameraId = e.target.value;
+      const opt = e.target.selectedOptions[0];
+      const label = opt ? opt.textContent : 'ブラウザ既定のカメラ';
+      if (!state.running){
+        log(`カメラを「${label}」に設定しました`);
+        return;
+      }
+      log(`カメラを「${label}」に切り替えます`);
+      try {
+        await openStream();
+      } catch (err){
+        // The old stream is already closed, so don't leave the session running
+        // against a dead video element.
+        showCameraError(err);
+        stopCamera();
+        setTrackDot('err');
+      }
+    });
+
+    // USB cameras and virtual cameras (OBS / NDI) appear and disappear while
+    // the page is open, so the list has to follow.
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener){
+      navigator.mediaDevices.addEventListener('devicechange', () => {
+        log('カメラ構成の変更を検出しました。一覧を更新します');
+        refreshCameraList();
+      });
+    }
+    refreshCameraList();
+
+    $('recalibBtn').addEventListener('click', () => {
+      resetPoseCalibration('姿勢の基準を取り直します。カメラを正面から見て、まっすぐ立ってください');
+      resetCameraAngle();
+    });
+    $('resetViewBtn').addEventListener('click', () => {
+      resetCameraAngle();
+      log('プレビューのアングルを正面に戻しました');
     });
 
     if (isFileProtocol()){
